@@ -1,0 +1,9 @@
+kd:
+  type: feature
+  lambda: 1.0
+  temperature: 4  # unused for feature KD, kept for consistency
+  alpha: 0.5      # weight for attention distillation component
+
+# Inherits from student config
+student_cfg: configs/rtdetr_r18vd_coco.yml
+teacher_cfg: configs/rtdetr_r50vd_coco.yml

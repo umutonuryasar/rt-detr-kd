@@ -1,0 +1,9 @@
+kd:
+  type: logit
+  lambda: 1.0
+  temperature: 4
+  alpha: 0.5  # unused for logit KD, kept for consistency
+
+# Inherits from student config
+student_cfg: configs/rtdetr_r18vd_coco.yml
+teacher_cfg: configs/rtdetr_r50vd_coco.yml

@@ -1,0 +1,33 @@
+model:
+  backbone: resnet18
+  num_classes: 80
+  hidden_dim: 256
+  num_queries: 100       # RTX 3050 4GB constraint (300 OOMs with teacher+student)
+  num_decoder_layers: 3  # 6 layers OOMs on 4GB with dual-model forward pass
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  num_encoder_layers: 1
+
+train:
+  epochs: 36
+  batch_size: 4
+  accumulate_steps: 2
+  img_size: 512          # 640 OOMs with both models; 512 fits in 4GB fp16
+  lr_backbone: 1.0e-4
+  lr_head: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_iters: 500
+  clip_max_norm: 0.1
+  use_amp: true
+
+data:
+  train_ann: ~/data/coco/annotations/instances_train2017_30k.json
+  val_ann: ~/data/coco/annotations/instances_val2017.json
+  train_img: ~/data/coco/train2017_30k
+  val_img: ~/data/coco/val2017
+  num_workers: 4
+
+checkpoint:
+  save_every: 5
+  output_dir: runs/baseline
