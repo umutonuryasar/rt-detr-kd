@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Run all 12 ablation configurations for the RT-DETR KD CS229 project.
+# Run all 14 ablation configurations for the RT-DETR KD project.
 #
 # Ablation grid:
 #   Run 0  : Baseline (no KD)
 #   Run 1-6: Logit-KD  (λ ∈ {0.5, 1.0} × T ∈ {2, 4, 8})
 #   Run 7-8: Feature-KD (λ ∈ {0.5, 1.0})
-#   Run 9-11: Reserved for extended/retrained configs
+#   Run 9  : Combined-KD (logit + feature, λ=1.0, T=4)
+#   Run 10 : Encoder-only partial KD (MSE only, λ=1.0)
+#   Run 11 : Attention-only partial KD (cosine only, λ=1.0)
+#   Run 12 : Feature-KD, teacher=R34 (capacity analysis)
+#   Run 13 : Feature-KD, teacher=R50 (capacity upper bound)
 #
 # Usage:
 #   bash scripts/run_ablation.sh [COCO_ROOT] [OUTPUT_ROOT]
 #
 # Prerequisites:
 #   - COCO data downloaded (see scripts/download_coco_subset.sh)
-#   - Teacher weights available at $TEACHER_WEIGHTS
+#   - Teacher weights available at $TEACHER_WEIGHTS / $TEACHER_WEIGHTS_R34
 
 set -euo pipefail
 
@@ -21,7 +25,8 @@ COCO_ROOT="${1:-$HOME/data/coco}"
 OUTPUT_ROOT="${2:-runs}"
 STUDENT_CFG="configs/rtdetr_r18vd_coco.yml"
 TEACHER_CFG="configs/rtdetr_r50vd_coco.yml"
-TEACHER_WEIGHTS="${TEACHER_WEIGHTS:-}"   # set externally or pass via env
+TEACHER_WEIGHTS="${TEACHER_WEIGHTS:-}"      # R50 teacher weights (set externally)
+TEACHER_WEIGHTS_R34="${TEACHER_WEIGHTS_R34:-}"  # R34 teacher weights (set externally)
 EPOCHS=36
 BATCH_SIZE=4
 IMG_SIZE=512   # 640 OOMs on RTX 3050 with teacher+student; 512 fits in 4GB fp16
@@ -38,6 +43,9 @@ run_experiment() {
     local kd_lambda="$3"
     local temperature="$4"
     local tag="$5"
+    local kd_cfg="${6:-}"         # optional: path to kd config yaml
+    local teacher_cfg="${7:-$TEACHER_CFG}"   # optional: override teacher config
+    local teacher_weights="${8:-$TEACHER_WEIGHTS}"  # optional: override teacher weights
     local output_dir="$OUTPUT_ROOT/$tag"
 
     echo ""
@@ -47,17 +55,24 @@ run_experiment() {
     echo " KD type    : $kd_type"
     echo " KD lambda  : $kd_lambda"
     echo " Temperature: $temperature"
+    echo " KD cfg     : ${kd_cfg:-<none>}"
+    echo " Teacher cfg: $teacher_cfg"
     echo " Output dir : $output_dir"
     echo "================================================================"
 
     local teacher_flag=""
-    if [ "$kd_type" != "none" ] && [ -n "$TEACHER_WEIGHTS" ]; then
-        teacher_flag="--teacher-weights $TEACHER_WEIGHTS"
+    if [ "$kd_type" != "none" ] && [ -n "$teacher_weights" ]; then
+        teacher_flag="--teacher-weights $teacher_weights"
+    fi
+
+    local kd_cfg_flag=""
+    if [ -n "$kd_cfg" ]; then
+        kd_cfg_flag="--kd-cfg $kd_cfg"
     fi
 
     python tools/train_kd.py \
         --student-cfg "$STUDENT_CFG" \
-        --teacher-cfg "$TEACHER_CFG" \
+        --teacher-cfg "$teacher_cfg" \
         --kd-type "$kd_type" \
         --kd-lambda "$kd_lambda" \
         --temperature "$temperature" \
@@ -71,6 +86,7 @@ run_experiment() {
         --val-ann "$VAL_ANN" \
         --use-amp \
         $teacher_flag \
+        $kd_cfg_flag \
         2>&1 | tee "$output_dir/train.log"
 
     echo ""
@@ -123,27 +139,25 @@ run_experiment 6 "logit" "1.0" "8" "run06_logit_l1.0_t8"
 run_experiment 7 "feature" "0.5" "4" "run07_feature_l0.5"
 run_experiment 8 "feature" "1.0" "4" "run08_feature_l1.0"
 
-# ---- Runs 9-11: Extended (full 72-epoch retrain of best config) ----
-# Uncomment when you have identified the best config from runs 0-8.
-#
-# echo ""
-# echo "Extended run: Feature-KD l=1.0, 72 epochs"
-# python tools/train_kd.py \
-#     --student-cfg "$STUDENT_CFG" \
-#     --teacher-cfg "$TEACHER_CFG" \
-#     --kd-type feature \
-#     --kd-lambda 1.0 \
-#     --epochs 72 \
-#     --batch-size "$BATCH_SIZE" \
-#     --img-size "$IMG_SIZE" \
-#     --output-dir "$OUTPUT_ROOT/run09_feature_l1.0_e72" \
-#     --coco-train "$TRAIN_IMG" \
-#     --coco-val "$VAL_IMG" \
-#     --train-ann "$TRAIN_ANN" \
-#     --val-ann "$VAL_ANN" \
-#     --mosaic \
-#     --use-amp \
-#     ${TEACHER_WEIGHTS:+--teacher-weights "$TEACHER_WEIGHTS"}
+# ---- Run 9: Combined-KD (logit + feature) ----
+run_experiment 9 "combined" "1.0" "4" "run09_combined_l1.0_t4" \
+    "configs/kd/combined_kd.yml"
+
+# ---- Run 10: Encoder-only partial KD ----
+run_experiment 10 "feature" "1.0" "4" "run10_encoder_only_l1.0" \
+    "configs/kd/encoder_only_kd.yml"
+
+# ---- Run 11: Attention-only partial KD ----
+run_experiment 11 "feature" "1.0" "4" "run11_attention_only_l1.0" \
+    "configs/kd/attention_only_kd.yml"
+
+# ---- Run 12: Feature-KD, teacher=R34 (capacity analysis) ----
+run_experiment 12 "feature" "1.0" "4" "run12_feature_teacher_r34" \
+    "" "configs/rtdetr_r34vd_coco.yml" "$TEACHER_WEIGHTS_R34"
+
+# ---- Run 13: Feature-KD, teacher=R50 (capacity upper bound) ----
+run_experiment 13 "feature" "1.0" "4" "run13_feature_teacher_r50" \
+    "" "$TEACHER_CFG" "$TEACHER_WEIGHTS"
 
 # ---- Summary ----
 ABLATION_END=$(date +%s)

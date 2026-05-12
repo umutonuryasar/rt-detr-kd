@@ -1,0 +1,11 @@
+kd:
+  type: combined
+  lambda: 1.0        # total KD loss weight
+  logit_weight: 0.5  # fraction of L_KD assigned to logit distillation
+  feature_weight: 0.5 # fraction of L_KD assigned to feature distillation
+  temperature: 4     # temperature for logit-KD softmax
+  alpha: 0.5         # attention weight inside feature-KD term
+
+# Inherits from student config
+student_cfg: configs/rtdetr_r18vd_coco.yml
+teacher_cfg: configs/rtdetr_r50vd_coco.yml

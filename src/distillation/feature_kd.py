@@ -38,6 +38,8 @@ class FeatureKDLoss(nn.Module):
         student_dim: Channel dimension of student encoder output.
         teacher_dim: Channel dimension of teacher encoder output.
         alpha:       Weight for the attention distillation term (L_attn).
+        feat_weight: Weight for the encoder MSE term (L_feat). Set to 0.0
+                     for attention-only distillation.
     """
 
     def __init__(
@@ -45,11 +47,13 @@ class FeatureKDLoss(nn.Module):
         student_dim: int = 256,
         teacher_dim: int = 256,
         alpha: float = 0.5,
+        feat_weight: float = 1.0,
     ):
         super().__init__()
         self.student_dim = student_dim
         self.teacher_dim = teacher_dim
         self.alpha = alpha
+        self.feat_weight = feat_weight
 
         # Projection to align channel dimensions.
         # Conv1d operates on [B, C, N] which is a natural fit for token sequences.
@@ -139,7 +143,7 @@ class FeatureKDLoss(nn.Module):
             cos_sim = F.cosine_similarity(s_flat, t_flat.detach(), dim=-1)  # [L*B*Q]
             loss_attn = (1.0 - cos_sim).mean()
 
-        loss_kd = loss_feat + self.alpha * loss_attn
+        loss_kd = self.feat_weight * loss_feat + self.alpha * loss_attn
 
         return {
             "loss_feat": loss_feat,
@@ -150,5 +154,5 @@ class FeatureKDLoss(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"student_dim={self.student_dim}, teacher_dim={self.teacher_dim}, "
-            f"alpha={self.alpha}"
+            f"alpha={self.alpha}, feat_weight={self.feat_weight}"
         )

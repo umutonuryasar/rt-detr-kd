@@ -314,15 +314,15 @@ Combined-KD: L_KD = logit_weight · L_logit + feature_weight · L_feature
 ## Phase checklist
 
 ### Phase 1 — Code & infra
-- [ ] lr_scheduler bug fix (`optimizer.step()` önce)
-- [ ] `configs/kd/combined_kd.yml` oluştur
-- [ ] `configs/kd/encoder_only_kd.yml` oluştur
-- [ ] `configs/kd/attention_only_kd.yml` oluştur
-- [ ] `feature_kd.py`'ye `feat_weight` parametresi ekle
-- [ ] `configs/rtdetr_r34vd_coco.yml` oluştur
-- [ ] `tools/export_trt.py` iskeleti oluştur
-- [ ] `scripts/run_ablation.sh` 14 run'a güncelle
-- [ ] `notebooks/colab_training.ipynb` iskeleti oluştur
+- [x] lr_scheduler bug fix (`optimizer.step()` önce) — kod zaten doğruydu, değişiklik gerekmedi
+- [x] `configs/kd/combined_kd.yml` oluştur
+- [x] `configs/kd/encoder_only_kd.yml` oluştur
+- [x] `configs/kd/attention_only_kd.yml` oluştur
+- [x] `feature_kd.py`'ye `feat_weight` parametresi ekle
+- [x] `configs/rtdetr_r34vd_coco.yml` oluştur
+- [x] `tools/export_trt.py` iskeleti oluştur
+- [x] `scripts/run_ablation.sh` 14 run'a güncelle
+- [x] `notebooks/colab_training.ipynb` iskeleti oluştur
 
 ### Phase 2 — Training (A100, Colab)
 - [ ] run00 baseline (lr fix sonrasi)
