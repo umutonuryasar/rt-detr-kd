@@ -45,7 +45,7 @@ Two complementary components:
 
 $$\mathcal{L}_{\text{feat}} = \text{MSE}\!\left(\text{proj}(s_{\text{enc}}),\, t_{\text{enc}}\right)$$
 
-$$\mathcal{L}_{\text{attn}} = 1 - \text{cos\_sim}(s_{\text{attn}},\, t_{\text{attn}})$$
+$$\mathcal{L}_{\text{attn}} = 1 - \frac{s_{\text{attn}} \cdot t_{\text{attn}}}{\|s_{\text{attn}}\| \|t_{\text{attn}}\|}$$
 
 $$\mathcal{L}_{\text{KD}} = w_f \cdot \mathcal{L}_{\text{feat}} + \alpha \cdot \mathcal{L}_{\text{attn}}$$
 
