@@ -73,7 +73,7 @@ $$\mathcal{L}_{\text{query}} = \text{MSE}(q_s,\, q_t)$$
 
 Combined with cross-attention pattern alignment between decoder queries:
 
-$$\mathcal{L}_{\text{query-attn}} = 1 - \text{cos\_sim}(A_s^{\text{dec}},\, A_t^{\text{dec}})$$
+$$\mathcal{L}_{\text{query-attn}} = 1 - \frac{A_s^{\text{dec}} \cdot A_t^{\text{dec}}}{\|A_s^{\text{dec}}\| \|A_t^{\text{dec}}\|}$$
 
 ### Stage-Adaptive KD (novel)
 Curriculum weighting that shifts from feature-heavy (structural alignment) to logit-heavy (semantic refinement) across training:
