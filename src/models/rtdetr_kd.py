@@ -13,10 +13,12 @@ Returned dictionary structure from forward():
             'pred_logits': [B, Q_t, num_classes],
             'pred_boxes':  [B, Q_t, 4],
         },
-        'student_enc_out': [B, N_s, D],   # encoder output
-        'teacher_enc_out': [B, N_t, D],
-        'student_attn': Tensor [L, B, H, Q_s, N_s] or None,
-        'teacher_attn': Tensor [L, B, H, Q_t, N_t] or None,
+        'student_enc_out':  [B, N_s, D],   # encoder output
+        'teacher_enc_out':  [B, N_t, D],
+        'student_attn':     Tensor [L, B, H, Q_s, N_s] or None,
+        'teacher_attn':     Tensor [L, B, H, Q_t, N_t] or None,
+        'student_queries':  Tensor [B, Q_s, D] or None,   # decoder queries
+        'teacher_queries':  Tensor [B, Q_t, D] or None,
     }
 """
 
@@ -70,20 +72,23 @@ class RTDETRWithKD(nn.Module):
         """
         # ---- Student forward (training mode, gradients flow) ----
         student_out = self.student(images)
-        student_enc = self.student.encoder_output          # [B, N_s, D]
-        student_attn = self.student.get_attn_maps_tensor() # [L, B, H, Q_s, N_s] or None
+        student_enc = self.student.encoder_output           # [B, N_s, D]
+        student_attn = self.student.get_attn_maps_tensor()  # [L, B, H, Q_s, N_s] or None
+        student_queries = self.student.decoder_queries      # [B, Q_s, D] or None
 
         # ---- Teacher forward (eval mode, no gradients) ----
         with torch.no_grad():
             teacher_out = self.teacher(images)
-            teacher_enc = self.teacher.encoder_output          # [B, N_t, D]
-            teacher_attn = self.teacher.get_attn_maps_tensor() # [L, B, H, Q_t, N_t] or None
+            teacher_enc = self.teacher.encoder_output           # [B, N_t, D]
+            teacher_attn = self.teacher.get_attn_maps_tensor()  # [L, B, H, Q_t, N_t] or None
+            teacher_queries = self.teacher.decoder_queries      # [B, Q_t, D] or None
 
             # Detach to be safe (no_grad already prevents grad flow, but
             # explicit detach ensures nothing leaks through clone/cat ops)
             teacher_out = {k: v.detach() for k, v in teacher_out.items()}
             teacher_enc = teacher_enc.detach() if teacher_enc is not None else None
             teacher_attn = teacher_attn.detach() if teacher_attn is not None else None
+            teacher_queries = teacher_queries.detach() if teacher_queries is not None else None
 
         return {
             "student": student_out,
@@ -92,6 +97,8 @@ class RTDETRWithKD(nn.Module):
             "teacher_enc_out": teacher_enc,
             "student_attn": student_attn,
             "teacher_attn": teacher_attn,
+            "student_queries": student_queries,
+            "teacher_queries": teacher_queries,
         }
 
     @property

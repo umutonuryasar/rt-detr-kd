@@ -1,0 +1,3 @@
+kd_type: cwd
+kd_lambda: 1.0
+tau: 1.0          # spatial softmax temperature

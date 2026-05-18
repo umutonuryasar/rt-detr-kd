@@ -224,6 +224,7 @@ class RTDETRDecoder(nn.Module):
 
         # Storage for KD
         self.attn_maps: list[torch.Tensor] = []
+        self.decoder_queries: Optional[torch.Tensor] = None
 
         self._init_weights()
 
@@ -258,6 +259,7 @@ class RTDETRDecoder(nn.Module):
                 self.attn_maps.append(layer.cross_attn_weights)
 
         queries = self.norm(queries)
+        self.decoder_queries = queries  # [B, num_queries, D] stored for Query-KD
 
         pred_logits = self.class_head(queries)  # [B, Q, num_classes]
         pred_boxes = self.bbox_head(queries).sigmoid()  # [B, Q, 4]

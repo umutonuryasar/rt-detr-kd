@@ -1,0 +1,3 @@
+kd_type: query
+kd_lambda: 1.0
+alpha: 0.5        # weight for decoder cross-attention alignment term

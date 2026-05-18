@@ -80,6 +80,7 @@ class RTDETR(nn.Module):
 
         # Will be populated after every forward pass
         self.encoder_output: Optional[torch.Tensor] = None
+        self.decoder_queries: Optional[torch.Tensor] = None
         self.attn_maps: list[torch.Tensor] = []
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -104,13 +105,18 @@ class RTDETR(nn.Module):
 
         # Decoder: predictions
         outputs = self.decoder(enc_out)
-        self.attn_maps = self.decoder.attn_maps  # list of [B, H, Q, N]
+        self.attn_maps = self.decoder.attn_maps       # list of [B, H, Q, N]
+        self.decoder_queries = self.decoder.decoder_queries  # [B, Q, D] for Query-KD
 
         return outputs
 
     def get_attn_maps_tensor(self) -> Optional[torch.Tensor]:
         """Return stacked cross-attention maps [L, B, H, Q, N] or None."""
         return self.decoder.get_attn_maps_tensor()
+
+    def get_decoder_queries(self) -> Optional[torch.Tensor]:
+        """Return post-norm decoder query embeddings [B, num_queries, D] or None."""
+        return self.decoder_queries
 
     @property
     def num_parameters(self) -> int:

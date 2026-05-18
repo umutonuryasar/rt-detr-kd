@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all 14 ablation configurations for the RT-DETR KD project.
+# Run all 18 ablation configurations for the RT-DETR KD project (Phase 2A).
 #
 # Ablation grid:
 #   Run 0  : Baseline (no KD)
@@ -10,6 +10,10 @@
 #   Run 11 : Attention-only partial KD (cosine only, λ=1.0)
 #   Run 12 : Feature-KD, teacher=R34 (capacity analysis)
 #   Run 13 : Feature-KD, teacher=R50 (capacity upper bound)
+#   Run 14 : CWD (Channel-Wise Distillation, ICCV'21 baseline)
+#   Run 15 : MGD (Masked Generative Distillation, ECCV'22 baseline)
+#   Run 16 : Query-KD (novel: decoder object query distillation)
+#   Run 17 : Stage-Adaptive KD (novel: curriculum weighting)
 #
 # Usage:
 #   bash scripts/run_ablation.sh [COCO_ROOT] [OUTPUT_ROOT]
@@ -158,6 +162,22 @@ run_experiment 12 "feature" "1.0" "4" "run12_feature_teacher_r34" \
 # ---- Run 13: Feature-KD, teacher=R50 (capacity upper bound) ----
 run_experiment 13 "feature" "1.0" "4" "run13_feature_teacher_r50" \
     "" "$TEACHER_CFG" "$TEACHER_WEIGHTS"
+
+# ---- Run 14: CWD (Channel-Wise Distillation, ICCV'21 baseline) ----
+run_experiment 14 "cwd" "1.0" "4" "run14_cwd_l1.0" \
+    "configs/kd/cwd_kd.yml"
+
+# ---- Run 15: MGD (Masked Generative Distillation, ECCV'22 baseline) ----
+run_experiment 15 "mgd" "1.0" "4" "run15_mgd_l1.0" \
+    "configs/kd/mgd_kd.yml"
+
+# ---- Run 16: Query-KD (novel: decoder object query distillation) ----
+run_experiment 16 "query" "1.0" "4" "run16_query_kd_l1.0" \
+    "configs/kd/query_kd.yml"
+
+# ---- Run 17: Stage-Adaptive KD (novel: curriculum weighting) ----
+run_experiment 17 "stage_adaptive" "1.0" "4" "run17_stage_adaptive_l1.0" \
+    "configs/kd/stage_adaptive_kd.yml"
 
 # ---- Summary ----
 ABLATION_END=$(date +%s)

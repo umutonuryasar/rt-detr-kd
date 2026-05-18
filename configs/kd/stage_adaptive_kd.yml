@@ -1,0 +1,5 @@
+kd_type: stage_adaptive
+kd_lambda: 1.0
+temperature: 4    # for the logit component
+alpha: 0.5        # attention weight within the feature component
+# total_epochs is set automatically from training config
