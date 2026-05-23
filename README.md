@@ -140,7 +140,7 @@ Two-phase design to balance experimental rigor against compute budget:
 
 | Phase | Dataset | Epochs | Runs | Purpose |
 |-------|---------|--------|------|---------|
-| **2A — Ablation** | COCO 30K subset | 36 | 18 | Hyperparameter search, method selection |
+| **2A — Ablation** | COCO 30K subset | 36 | 23 | Hyperparameter search, method selection |
 | **2D — Final** | Full COCO 118K | 72 | ~8 | Paper numbers, SOTA comparison |
 | **2E — Reliability** | Full COCO 118K | 72 | 3 seeds | Mean ± std for best method |
 
@@ -233,7 +233,7 @@ python tools/train_kd.py \
   --batch-size 4 \
   --output-dir runs/feature_kd_l1.0
 
-# All 18 ablation runs (Phase 2A)
+# All 23 ablation runs (Phase 2A) — see scripts/run_ablation.sh header for the full grid
 bash scripts/run_ablation.sh /data/coco runs
 
 # Final paper runs (Phase 2D, full COCO, 72 epochs)
