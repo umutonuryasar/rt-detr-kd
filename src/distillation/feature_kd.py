@@ -56,17 +56,18 @@ class FeatureKDLoss(nn.Module):
         self.feat_weight = feat_weight
 
         # Projection to align channel dimensions.
-        # Conv1d operates on [B, C, N] which is a natural fit for token sequences.
+        # Conv1d operates on [B, C, N] which fits token sequences naturally.
+        # When dims already match we use Identity to avoid a learnable mapping
+        # that the optimizer would otherwise have to discover is unnecessary.
         if student_dim != teacher_dim:
             self.proj = nn.Conv1d(student_dim, teacher_dim, kernel_size=1, bias=False)
+            self._init_weights()
         else:
-            # Identity when dims already match (no learnable parameters wasted)
-            self.proj = nn.Conv1d(student_dim, teacher_dim, kernel_size=1, bias=False)
-
-        self._init_weights()
+            self.proj = nn.Identity()
 
     def _init_weights(self) -> None:
-        nn.init.xavier_uniform_(self.proj.weight)
+        if isinstance(self.proj, nn.Conv1d):
+            nn.init.xavier_uniform_(self.proj.weight)
 
     def forward(
         self,

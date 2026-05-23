@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all 18 ablation configurations for the RT-DETR KD project (Phase 2A).
+# Run all 23 ablation configurations for the RT-DETR KD project (Phase 2A).
 #
 # Ablation grid:
 #   Run 0  : Baseline (no KD)
@@ -13,7 +13,12 @@
 #   Run 14 : CWD (Channel-Wise Distillation, ICCV'21 baseline)
 #   Run 15 : MGD (Masked Generative Distillation, ECCV'22 baseline)
 #   Run 16 : Query-KD (novel: decoder object query distillation)
-#   Run 17 : Stage-Adaptive KD (novel: curriculum weighting)
+#   Run 17 : Stage-Adaptive KD, cosine schedule (novel: curriculum weighting)
+#   Run 18 : Stage-Adaptive KD, linear schedule          (schedule ablation)
+#   Run 19 : Stage-Adaptive KD, step schedule           (schedule ablation)
+#   Run 20 : Stage-Adaptive KD, sigmoid schedule        (schedule ablation)
+#   Run 21 : Stage-Adaptive KD, inverse-cosine schedule (curriculum-direction control)
+#   Run 22 : Baseline, 2x training length (72 epochs, no KD) — "does KD beat training longer?"
 #
 # Usage:
 #   bash scripts/run_ablation.sh [COCO_ROOT] [OUTPUT_ROOT]
@@ -31,6 +36,22 @@ STUDENT_CFG="configs/rtdetr_r18vd_coco.yml"
 TEACHER_CFG="configs/rtdetr_r50vd_coco.yml"
 TEACHER_WEIGHTS="${TEACHER_WEIGHTS:-}"      # R50 teacher weights (set externally)
 TEACHER_WEIGHTS_R34="${TEACHER_WEIGHTS_R34:-}"  # R34 teacher weights (set externally)
+
+# ---- Teacher source (B1 cross-architecture KD vs. own simplified teacher) ----
+# Set TEACHER_SOURCE=lyuwenyu to use the canonical RT-DETR teacher from the
+# lyuwenyu/RT-DETR submodule. Set LYUWENYU_CFG to one of their YAMLs.
+# Example:
+#   TEACHER_SOURCE=lyuwenyu \
+#   LYUWENYU_CFG=third_party/RT-DETR/rtdetr_pytorch/configs/rtdetr/rtdetr_r50vd_6x_coco.yml \
+#   TEACHER_WEIGHTS=weights/rtdetr_r50vd_6x_coco_from_paddle.pth \
+#   TEACHER_MIN_MAP=0.45 \
+#   bash scripts/run_ablation.sh /data/coco runs
+TEACHER_SOURCE="${TEACHER_SOURCE:-own}"      # own | lyuwenyu
+LYUWENYU_CFG="${LYUWENYU_CFG:-}"
+TEACHER_MIN_MAP="${TEACHER_MIN_MAP:-0.0}"    # 0.0 disables the gate
+TEACHER_MIN_MAP_R34="${TEACHER_MIN_MAP_R34:-$TEACHER_MIN_MAP}"
+EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"     # power-user escape hatch
+
 EPOCHS=36
 BATCH_SIZE=4
 IMG_SIZE=512   # 640 OOMs on RTX 3050 with teacher+student; 512 fits in 4GB fp16
@@ -64,6 +85,21 @@ run_experiment() {
     echo " Output dir : $output_dir"
     echo "================================================================"
 
+    # tee opens log files at pipeline construction time, before Python creates
+    # the output dir — explicitly create it first to avoid first-run failures.
+    mkdir -p "$output_dir"
+
+    # ---- Skip-if-done (resilience to Colab session drops) ----
+    # A run is considered complete when checkpoint_best.pth exists AND eval.log
+    # contains a COCO mAP result. Re-running the script after a session drop
+    # should not re-train completed runs from scratch.
+    if [ -f "$output_dir/checkpoint_best.pth" ] \
+       && [ -f "$output_dir/eval.log" ] \
+       && grep -q "AP@\[.5:.95\]" "$output_dir/eval.log" 2>/dev/null; then
+        echo "  ✓ Already complete — skipping ($output_dir/checkpoint_best.pth + eval.log present)"
+        return 0
+    fi
+
     local teacher_flag=""
     if [ "$kd_type" != "none" ] && [ -n "$teacher_weights" ]; then
         teacher_flag="--teacher-weights $teacher_weights"
@@ -72,6 +108,33 @@ run_experiment() {
     local kd_cfg_flag=""
     if [ -n "$kd_cfg" ]; then
         kd_cfg_flag="--kd-cfg $kd_cfg"
+    fi
+
+    # ---- Cross-architecture (lyuwenyu) teacher flags ----
+    # Only emitted when this run uses the configured cross-arch teacher.
+    # Run 12 (teacher=R34) intentionally stays on the simplified teacher
+    # because there is no R34 canonical checkpoint with comparable mAP, so
+    # it always uses TEACHER_SOURCE=own regardless of the environment.
+    local lyuwenyu_flag=""
+    local min_map="${TEACHER_MIN_MAP}"
+    if [ "$kd_type" != "none" ] \
+       && [ "$TEACHER_SOURCE" = "lyuwenyu" ] \
+       && [ "$teacher_cfg" = "$TEACHER_CFG" ]; then
+        if [ -z "$LYUWENYU_CFG" ]; then
+            echo "ERROR: TEACHER_SOURCE=lyuwenyu but LYUWENYU_CFG is not set." >&2
+            exit 1
+        fi
+        lyuwenyu_flag="--teacher-source lyuwenyu --lyuwenyu-cfg $LYUWENYU_CFG"
+    else
+        # R34-teacher path uses its own gate threshold (usually 0.0)
+        if [ "$teacher_cfg" != "$TEACHER_CFG" ]; then
+            min_map="${TEACHER_MIN_MAP_R34}"
+        fi
+    fi
+
+    local map_gate_flag=""
+    if [ "$kd_type" != "none" ]; then
+        map_gate_flag="--teacher-min-map $min_map"
     fi
 
     python tools/train_kd.py \
@@ -91,6 +154,9 @@ run_experiment() {
         --use-amp \
         $teacher_flag \
         $kd_cfg_flag \
+        $lyuwenyu_flag \
+        $map_gate_flag \
+        $EXTRA_TRAIN_ARGS \
         2>&1 | tee "$output_dir/train.log"
 
     echo ""
@@ -175,9 +241,34 @@ run_experiment 15 "mgd" "1.0" "4" "run15_mgd_l1.0" \
 run_experiment 16 "query" "1.0" "4" "run16_query_kd_l1.0" \
     "configs/kd/query_kd.yml"
 
-# ---- Run 17: Stage-Adaptive KD (novel: curriculum weighting) ----
-run_experiment 17 "stage_adaptive" "1.0" "4" "run17_stage_adaptive_l1.0" \
+# ---- Run 17: Stage-Adaptive KD, cosine (novel: curriculum weighting) ----
+run_experiment 17 "stage_adaptive" "1.0" "4" "run17_stage_adaptive_cosine" \
     "configs/kd/stage_adaptive_kd.yml"
+
+# ---- Run 18: Stage-Adaptive KD, linear schedule (schedule ablation) ----
+run_experiment 18 "stage_adaptive" "1.0" "4" "run18_stage_adaptive_linear" \
+    "configs/kd/stage_adaptive_linear_kd.yml"
+
+# ---- Run 19: Stage-Adaptive KD, step schedule (schedule ablation) ----
+run_experiment 19 "stage_adaptive" "1.0" "4" "run19_stage_adaptive_step" \
+    "configs/kd/stage_adaptive_step_kd.yml"
+
+# ---- Run 20: Stage-Adaptive KD, sigmoid schedule (schedule ablation) ----
+run_experiment 20 "stage_adaptive" "1.0" "4" "run20_stage_adaptive_sigmoid" \
+    "configs/kd/stage_adaptive_sigmoid_kd.yml"
+
+# ---- Run 21: Stage-Adaptive KD, inverse-cosine (curriculum-direction control) ----
+# If this performs comparably to run17, the curriculum DIRECTION is not what
+# drives the effect — important sanity check for the paper.
+run_experiment 21 "stage_adaptive" "1.0" "4" "run21_stage_adaptive_inv_cosine" \
+    "configs/kd/stage_adaptive_inv_cosine_kd.yml"
+
+# ---- Run 22: Baseline, 2x epochs (reviewer control: "does KD beat training longer?") ----
+LONG_EPOCHS=$((EPOCHS * 2))
+EPOCHS_SAVED=$EPOCHS
+EPOCHS=$LONG_EPOCHS
+run_experiment 22 "none" "0.0" "4" "run22_baseline_2x_epochs"
+EPOCHS=$EPOCHS_SAVED
 
 # ---- Summary ----
 ABLATION_END=$(date +%s)

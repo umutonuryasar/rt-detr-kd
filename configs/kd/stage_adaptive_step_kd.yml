@@ -1,0 +1,6 @@
+kd_type: stage_adaptive
+kd_lambda: 1.0
+temperature: 4
+alpha: 0.5
+schedule: step
+# Hard switch at the midpoint: w_feat=1 for first half, then w_feat=0.

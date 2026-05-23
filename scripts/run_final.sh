@@ -56,6 +56,16 @@ run_experiment() {
     echo " Run $run_id (seed $seed): $tag"
     echo "================================================================"
 
+    mkdir -p "$output_dir"
+
+    # Skip-if-done (resilience to Colab session drops).
+    if [ -f "$output_dir/checkpoint_best.pth" ] \
+       && [ -f "$output_dir/eval.log" ] \
+       && grep -q "AP@\[.5:.95\]" "$output_dir/eval.log" 2>/dev/null; then
+        echo "  ✓ Already complete — skipping ($output_dir)"
+        return 0
+    fi
+
     local teacher_flag=""
     if [ "$kd_type" != "none" ] && [ -n "$teacher_weights" ]; then
         teacher_flag="--teacher-weights $teacher_weights"

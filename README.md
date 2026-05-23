@@ -23,11 +23,44 @@ Standard model compression of RT-DETR yields significant mAP degradation. This w
 
 ## Models
 
-| Model | Backbone | Params | mAP@[.5:.95] | FPS (T4) |
-|-------|----------|--------|--------------|----------|
-| RT-DETR-S (student) | ResNet-18 | 17M | 48.9 | ~120 |
-| RT-DETR-M (teacher) | ResNet-34 | 25M | 51.3 | ~117 |
-| RT-DETR-L (teacher) | ResNet-50 | 32M | 53.1 | ~114 |
+This repository pairs a **canonical teacher** loaded from the official
+[lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) PyTorch release with a
+**simplified custom student** trained from scratch. The two architectures are
+intentionally different (see §3.2 below); KD therefore operates
+cross-architecture. The teacher mAPs cited below come from the upstream
+repository; the student mAP is what this codebase produces and is reported in
+all paper tables.
+
+| Role | Backbone | Source | Params | mAP@[.5:.95] | FPS (T4) |
+|------|----------|--------|--------|--------------|----------|
+| Student (this repo, simplified) | ResNet-18 | trained here | 17M | TBD (Phase 2D) | ~120 |
+| Teacher (canonical RT-DETR-M) | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3¹ | ~117 |
+| Teacher (canonical RT-DETR-L) | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1¹ | ~114 |
+
+¹ Cited verbatim from lyuwenyu/RT-DETR's published checkpoints. Verified at
+training start via the teacher mAP sanity gate (`tools/train_kd.py`
+`--teacher-min-map`).
+
+### 3.2 Implementation differences from canonical RT-DETR
+
+The student differs from the teacher in four ways. Every simplification is
+imposed by the 4 GB RTX 3050 VRAM budget for dual-model forward passes during
+KD; canonical RT-DETR will not fit. These differences apply to the **student
+only**; the teacher is the canonical architecture loaded with published
+weights.
+
+| Component | Canonical RT-DETR | This student | Reason |
+|-----------|-------------------|--------------|--------|
+| Object queries | 300 | 100 | OOMs on 4 GB with teacher+student fp16 forward |
+| Decoder layers | 6 | 3 | OOMs at 6 layers with dual forward pass |
+| Cross-attention | Multi-scale deformable | Vanilla MHA | Deformable kernel doubles backward memory |
+| Encoder memory | C3 + C4 + C5 | C4 + C5 only | C3 token count alone (6400 @ 640²) saturates VRAM |
+
+The Phase 2D final runs are executed on Colab A100, where these constraints
+do not apply; however we keep the same simplified student for consistency
+across ablation and final phases. Reviewers should interpret the absolute
+student mAP as belonging to this simplified architecture; the relative
+*KD-method* ranking, which is what the paper measures, is what transfers.
 
 ---
 
@@ -67,13 +100,24 @@ $$\mathcal{L}_{\text{MGD}} = \left\| \mathcal{G}\!\left(\mathbf{M} \odot s_{\tex
 where $\mathbf{M}$ is a random binary mask and $\mathcal{G}$ is a small convolutional generator.
 
 ### Query-KD (novel)
-Distills RT-DETR's decoder object queries directly — a transformer-specific component not addressed by prior KD methods:
+Distills RT-DETR's decoder object queries directly — a transformer-specific component not exploited by CNN-detector KD methods:
 
 $$\mathcal{L}_{\text{query}} = \text{MSE}(q_s,\, q_t)$$
 
 Combined with cross-attention pattern alignment between decoder queries:
 
 $$\mathcal{L}_{\text{query-attn}} = 1 - \frac{A_s^{\text{dec}} \cdot A_t^{\text{dec}}}{\|A_s^{\text{dec}}\| \|A_t^{\text{dec}}\|}$$
+
+**Differentiation from prior work.** DETRDistill (ICLR'23) targets DETR's
+*matched* query-to-prediction pairs after Hungarian assignment, requiring
+joint matching of teacher and student. Our formulation aligns the *post-norm*
+decoder embeddings of the first `min(Q_s, Q_t)` queries directly, with no
+shared matcher — simpler, robust to teacher/student query count mismatch
+(here 300 vs 100), and combinable with the cross-attention cosine term that
+DETRDistill does not consider. The closest precedent on the attention side is
+MimicDet (ECCV'20) which mimics RPN-style attention in two-stage detectors;
+we instead align decoder cross-attention against encoder memory, which is the
+RT-DETR-specific signal that CNN-detector KD cannot use.
 
 ### Stage-Adaptive KD (novel)
 Curriculum weighting that shifts from feature-heavy (structural alignment) to logit-heavy (semantic refinement) across training:
@@ -106,7 +150,7 @@ Phase 2A identifies top-performing configurations; Phase 2D re-trains only those
 
 ## Ablation grid
 
-### Phase 2A — COCO 30K subset, 36 epochs (18 runs)
+### Phase 2A — COCO 30K subset, 36 epochs (23 runs)
 
 | Run | KD type | λ | T | Notes |
 |-----|---------|---|---|-------|
@@ -127,7 +171,12 @@ Phase 2A identifies top-performing configurations; Phase 2D re-trains only those
 | 14 | CWD | 1.0 | — | Baseline comparison |
 | 15 | MGD | 1.0 | — | Baseline comparison |
 | 16 | Query-KD | 1.0 | — | Novel: decoder query distillation |
-| 17 | Stage-Adaptive | 1.0 | — | Novel: curriculum weighting |
+| 17 | Stage-Adaptive, cosine | 1.0 | — | Novel: curriculum weighting |
+| 18 | Stage-Adaptive, linear | 1.0 | — | Schedule ablation |
+| 19 | Stage-Adaptive, step | 1.0 | — | Schedule ablation |
+| 20 | Stage-Adaptive, sigmoid | 1.0 | — | Schedule ablation |
+| 21 | Stage-Adaptive, inverse cosine | 1.0 | — | **Curriculum-direction control** |
+| 22 | Baseline (72 epochs, 2×) | — | — | **Reviewer control**: "does KD beat training longer?" |
 
 ### Phase 2D — Full COCO, 72 epochs (~8 runs)
 
@@ -142,11 +191,19 @@ Best method × 3 random seeds on full COCO, 72 epochs. All paper results report 
 ## Setup
 
 ```bash
-git clone https://github.com/umutonuryasar/rt-detr-kd
+git clone --recurse-submodules https://github.com/umutonuryasar/rt-detr-kd
 cd rt-detr-kd
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# If you cloned without --recurse-submodules:
+git submodule update --init --recursive
 ```
+
+The `third_party/RT-DETR` submodule pins
+[lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) — the official PyTorch
+implementation from the original authors. It is used as the canonical KD
+teacher (see §3.2).
 
 ### Download COCO
 
@@ -213,6 +270,14 @@ python tools/eval.py \
   --val-ann /data/coco/annotations/instances_val2017.json
 ```
 
+**Decoding protocol.** All evaluation uses DETR-style top-k decoding over
+the flattened `(num_queries × num_classes)` score tensor (k=100), not
+per-query argmax. A single query may legitimately surface under multiple
+classes; top-k recovers those predictions and matches the standard DETR /
+Deformable-DETR / RT-DETR evaluation protocol. Argmax decoding
+under-reports mAP by 1–3 points and is *not* used anywhere in this
+repository (see `src.trainer_kd._topk_decode`).
+
 ---
 
 ## FPS benchmarking
@@ -276,16 +341,26 @@ rt-detr-kd/
 │   ├── train_kd.py
 │   ├── eval.py
 │   ├── benchmark_fps.py
-│   └── export_trt.py                   # ONNX → TensorRT INT8
+│   ├── export_trt.py                   # ONNX → TensorRT FP32/FP16/INT8 + benchmark
+│   ├── verify_teacher_kd.py            # Cross-architecture KD smoke test
+│   └── aggregate_results.py            # Walk runs/ → CSV + Markdown table
+├── tests/                              # pytest smoke tests (CI on every push)
+│   ├── test_kd_losses.py
+│   ├── test_models.py
+│   └── conftest.py
+├── third_party/
+│   └── RT-DETR/                        # lyuwenyu/RT-DETR submodule — canonical teacher
 ├── notebooks/
 │   ├── ablation_analysis.ipynb
 │   ├── visualize_attention.ipynb
 │   └── colab_training.ipynb
-└── scripts/
-    ├── download_coco_subset.sh
-    ├── download_coco_full.sh
-    ├── run_ablation.sh                  # Phase 2A: 18 runs
-    └── run_final.sh                     # Phase 2D: final paper runs
+├── scripts/
+│   ├── download_coco_subset.sh
+│   ├── download_coco_full.sh
+│   ├── run_ablation.sh                  # Phase 2A: 23 runs
+│   └── run_final.sh                     # Phase 2D: final paper runs
+└── .github/workflows/
+    └── ci.yml                           # pytest on every push
 ```
 
 ---

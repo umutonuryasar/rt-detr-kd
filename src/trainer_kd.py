@@ -36,6 +36,42 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Decoding (DETR-style top-k over Q*C)
+# ---------------------------------------------------------------------------
+
+def _topk_decode(
+    pred_logits: torch.Tensor,
+    pred_boxes: torch.Tensor,
+    top_k: int = 100,
+):
+    """DETR-style top-k decoding.
+
+    Argmax-per-query under-counts multi-label predictions because a single
+    object query may legitimately be the top scorer for multiple classes.
+    Top-k over the flattened (Q*C) score tensor recovers those predictions.
+
+    Args:
+        pred_logits: [B, Q, C] raw class logits.
+        pred_boxes:  [B, Q, 4] normalized cxcywh boxes.
+        top_k:       Number of predictions to keep per image (DETR uses 100).
+
+    Returns:
+        Tuple of (scores [B, K], labels [B, K], boxes [B, K, 4]) where
+        K = min(top_k, Q*C).
+    """
+    B, Q, C = pred_logits.shape
+    prob = pred_logits.sigmoid()                                  # [B, Q, C]
+    k = min(top_k, Q * C)
+    topk_scores, topk_idx = prob.flatten(1).topk(k, dim=1)        # [B, K]
+    labels = topk_idx % C                                          # [B, K]
+    query_idx = topk_idx // C                                      # [B, K]
+    boxes = torch.gather(
+        pred_boxes, 1, query_idx.unsqueeze(-1).expand(-1, -1, 4)
+    )                                                              # [B, K, 4]
+    return topk_scores, labels, boxes
+
+
+# ---------------------------------------------------------------------------
 # Learning-rate schedule
 # ---------------------------------------------------------------------------
 
@@ -340,10 +376,14 @@ class KDTrainer:
             pred_logits = outputs["pred_logits"]  # [B, Q, C]
             pred_boxes = outputs["pred_boxes"]    # [B, Q, 4]
 
-            scores, labels = pred_logits.sigmoid().max(dim=-1)  # [B, Q]
+            # Top-k decoding over (Q*C) — standard DETR / RT-DETR eval protocol.
+            # A single query may surface under multiple classes, which recovers
+            # the multi-label mAP that argmax decoding under-counts.
+            scores, labels, decoded_boxes = _topk_decode(pred_logits, pred_boxes,
+                                                         top_k=100)
 
             for i, (img_scores, img_labels, img_boxes, target) in enumerate(
-                zip(scores, labels, pred_boxes, targets)
+                zip(scores, labels, decoded_boxes, targets)
             ):
                 img_id = target["image_id"]
                 if isinstance(img_id, torch.Tensor):
@@ -360,7 +400,7 @@ class KDTrainer:
                 x0 = cx - bw / 2
                 y0 = cy - bh / 2
 
-                for j in range(len(img_scores)):
+                for j in range(img_scores.size(0)):
                     score = img_scores[j].item()
                     if score < 0.01:
                         continue

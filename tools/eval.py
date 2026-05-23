@@ -23,7 +23,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,6 +32,7 @@ import yaml
 from src.models.rtdetr import build_rtdetr
 from src.data.coco_dataset import COCODetection, collate_fn, _COCO_CATEGORIES_80
 from src.data.transforms import build_transforms
+from src.trainer_kd import _topk_decode
 
 try:
     from pycocotools.coco import COCO
@@ -94,16 +95,17 @@ def run_inference(
     for images, targets in loader:
         images = images.to(device)
 
-        with autocast(enabled=use_amp and device.type == "cuda"):
+        with autocast("cuda", enabled=use_amp and device.type == "cuda"):
             outputs = model(images)
 
         pred_logits = outputs["pred_logits"]  # [B, Q, C]
         pred_boxes = outputs["pred_boxes"]    # [B, Q, 4]
 
-        scores, labels = pred_logits.sigmoid().max(dim=-1)  # [B, Q]
+        # DETR-style top-k(Q*C) decoding (see src.trainer_kd._topk_decode).
+        scores, labels, decoded_boxes = _topk_decode(pred_logits, pred_boxes, top_k=100)
 
         for i, (img_scores, img_labels, img_boxes, target) in enumerate(
-            zip(scores, labels, pred_boxes, targets)
+            zip(scores, labels, decoded_boxes, targets)
         ):
             img_id = target["image_id"]
             if isinstance(img_id, torch.Tensor):

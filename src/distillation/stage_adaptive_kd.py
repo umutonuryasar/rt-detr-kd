@@ -2,19 +2,26 @@
 
 Novel contribution: automatically transitions the KD objective from
 feature-heavy (structural alignment) to logit-heavy (semantic refinement)
-across training using a cosine annealing schedule.
+across training. The default is a cosine annealing schedule; the schedule
+shape itself is an ablatable design choice — see ``schedule`` argument.
 
 Motivation: Early training benefits from feature alignment to guide the student
 toward meaningful internal representations. Later training benefits from
 logit-level semantic refinement when the student structure is already aligned.
 
-Weight schedule:
-    w_feat(e)  = cos( pi * e / (2 * E) )   [1 → 0 over training]
-    w_logit(e) = 1 - w_feat(e)             [0 → 1 over training]
+Schedules (with ``e`` the current epoch and ``E`` total epochs):
 
-    L_KD(e) = w_feat(e) * L_feat + w_logit(e) * L_logit
+    cosine          w_feat = cos(π e / (2E))                    [1 → 0]
+    linear          w_feat = 1 - e/E                            [1 → 0]
+    step            w_feat = 1 if e < E/2 else 0                [hard switch at midpoint]
+    sigmoid         w_feat = σ(k (E/2 - e) / E),  k = 10        [smooth transition around E/2]
+    inverse_cosine  w_feat = sin(π e / (2E))                    [0 → 1, control / sanity check]
 
-where e is the current epoch and E is total epochs.
+The ``inverse_cosine`` variant is the curriculum-direction control: if it
+performs comparably to ``cosine`` the curriculum direction is not what is
+driving the effect, weakening the contribution.
+
+    L_KD(e) = w_feat(e) · L_feat + w_logit(e) · L_logit
 """
 
 import math
@@ -26,6 +33,9 @@ from .feature_kd import FeatureKDLoss
 from .logit_kd import LogitKDLoss
 
 
+SUPPORTED_SCHEDULES = ("cosine", "linear", "step", "sigmoid", "inverse_cosine")
+
+
 class StageAdaptiveKDLoss(nn.Module):
     """Curriculum KD that shifts from feature to logit distillation.
 
@@ -33,6 +43,9 @@ class StageAdaptiveKDLoss(nn.Module):
         feature_loss:  Instantiated FeatureKDLoss.
         logit_loss:    Instantiated LogitKDLoss.
         total_epochs:  Total number of training epochs (E in the schedule).
+        schedule:      One of SUPPORTED_SCHEDULES.
+        sigmoid_k:     Steepness for the ``sigmoid`` schedule (default 10).
+                       Higher = more step-like.
     """
 
     def __init__(
@@ -40,18 +53,43 @@ class StageAdaptiveKDLoss(nn.Module):
         feature_loss: FeatureKDLoss,
         logit_loss: LogitKDLoss,
         total_epochs: int = 36,
+        schedule: str = "cosine",
+        sigmoid_k: float = 10.0,
     ):
         super().__init__()
         if total_epochs <= 0:
             raise ValueError(f"total_epochs must be > 0, got {total_epochs}")
+        if schedule not in SUPPORTED_SCHEDULES:
+            raise ValueError(
+                f"schedule must be one of {SUPPORTED_SCHEDULES}, got '{schedule}'"
+            )
         self.feature_loss = feature_loss
         self.logit_loss = logit_loss
         self.total_epochs = total_epochs
+        self.schedule = schedule
+        self.sigmoid_k = sigmoid_k
 
     def _weights(self, epoch: int) -> tuple[float, float]:
-        """Return (w_feat, w_logit) for the given epoch."""
+        """Return (w_feat, w_logit) for the given epoch under self.schedule."""
         e = max(0, min(epoch, self.total_epochs))
-        w_feat = math.cos(math.pi * e / (2 * self.total_epochs))
+        E = self.total_epochs
+
+        if self.schedule == "cosine":
+            w_feat = math.cos(math.pi * e / (2 * E))
+        elif self.schedule == "linear":
+            w_feat = 1.0 - e / E
+        elif self.schedule == "step":
+            w_feat = 1.0 if e < E / 2 else 0.0
+        elif self.schedule == "sigmoid":
+            # Centered at E/2 with steepness sigmoid_k.
+            x = self.sigmoid_k * (E / 2 - e) / E
+            w_feat = 1.0 / (1.0 + math.exp(-x))
+        elif self.schedule == "inverse_cosine":
+            # 0 → 1 (logit-heavy early) — curriculum-direction control.
+            w_feat = math.sin(math.pi * e / (2 * E))
+        else:
+            raise AssertionError(self.schedule)
+
         w_logit = 1.0 - w_feat
         return w_feat, w_logit
 
@@ -104,4 +142,4 @@ class StageAdaptiveKDLoss(nn.Module):
         }
 
     def extra_repr(self) -> str:
-        return f"total_epochs={self.total_epochs}"
+        return f"total_epochs={self.total_epochs}, schedule={self.schedule}"

@@ -66,6 +66,7 @@ class KDLoss(nn.Module):
         tau: float = 1.0,
         mask_ratio: float = 0.75,
         total_epochs: int = 36,
+        schedule: str = "cosine",
     ):
         super().__init__()
         if kd_type not in SUPPORTED_KD_TYPES:
@@ -133,6 +134,7 @@ class KDLoss(nn.Module):
                 feature_loss=feature_loss,
                 logit_loss=logit_loss,
                 total_epochs=total_epochs,
+                schedule=schedule,
             )
 
     def forward(

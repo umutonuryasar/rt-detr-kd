@@ -54,70 +54,7 @@ echo "      Done."
 # Step 2: Sample 30K training images stratified by category
 # ------------------------------------------------------------------
 echo "[2/4] Sampling $NUM_TRAIN_IMAGES training images (stratified)..."
-python3 - <<'PYEOF'
-import json
-import os
-import random
-from collections import defaultdict
-
-ann_dir   = os.environ.get("ANN_DIR", "/data/coco/annotations")
-n_images  = int(os.environ.get("NUM_TRAIN_IMAGES", "30000"))
-seed      = 42
-random.seed(seed)
-
-ann_file  = os.path.join(ann_dir, "instances_train2017.json")
-out_file  = os.path.join(ann_dir, "instances_train2017_30k.json")
-
-print(f"  Loading {ann_file}...")
-with open(ann_file) as f:
-    coco = json.load(f)
-
-# Build category -> list of image_ids mapping
-cat_to_imgs = defaultdict(set)
-for ann in coco["annotations"]:
-    cat_to_imgs[ann["category_id"]].add(ann["image_id"])
-
-img_id_set = {img["id"] for img in coco["images"]}
-n_cats = len(cat_to_imgs)
-quota_per_cat = max(1, n_images // n_cats)
-
-selected_ids = set()
-# First pass: ensure coverage of all categories
-for cat_id, img_ids in cat_to_imgs.items():
-    candidates = list(img_ids)
-    random.shuffle(candidates)
-    selected_ids.update(candidates[:quota_per_cat])
-
-# Second pass: fill remaining quota randomly
-remaining = list(img_id_set - selected_ids)
-random.shuffle(remaining)
-needed = max(0, n_images - len(selected_ids))
-selected_ids.update(remaining[:needed])
-
-# Trim to exactly n_images
-selected_ids = set(list(selected_ids)[:n_images])
-print(f"  Selected {len(selected_ids)} images covering {n_cats} categories.")
-
-# Filter coco dict
-selected_imgs  = [img for img in coco["images"] if img["id"] in selected_ids]
-selected_anns  = [ann for ann in coco["annotations"] if ann["image_id"] in selected_ids]
-
-subset = {
-    "info":        coco.get("info", {}),
-    "licenses":    coco.get("licenses", []),
-    "categories":  coco["categories"],
-    "images":      selected_imgs,
-    "annotations": selected_anns,
-}
-with open(out_file, "w") as f:
-    json.dump(subset, f)
-
-print(f"  Saved subset annotation: {out_file}")
-print(f"  Images: {len(selected_imgs)}, Annotations: {len(selected_anns)}")
-PYEOF
-
 export ANN_DIR NUM_TRAIN_IMAGES
-# Re-run the python block with environment variables set
 ANN_DIR="$ANN_DIR" NUM_TRAIN_IMAGES="$NUM_TRAIN_IMAGES" python3 - <<'PYEOF'
 import json, os, random
 from collections import defaultdict

@@ -7,6 +7,13 @@
 **Target:** arXiv cs.CV (1–2 months)  
 **Objective:** Systematic KD study on RT-DETR — logit, feature, combined, partial, CWD/MGD baselines, and novel RT-DETR-specific methods — with edge deployment analysis on RTX 3050.
 
+**Architecture decision (2026-05-23):** B1 cross-architecture KD. Teacher is
+the canonical RT-DETR loaded from the official `lyuwenyu/RT-DETR` PyTorch
+release (added as git submodule under `third_party/RT-DETR`). Student is the
+simplified custom architecture in `src/models/rtdetr.py` (100 queries,
+3 decoder layers, vanilla MHA, C4+C5 memory) — forced by the 4 GB RTX 3050
+VRAM budget. Implementation differences are documented in README §3.2.
+
 ---
 
 ## Repository structure
@@ -75,7 +82,7 @@ rt_detr_kd/
 
 | Phase | Dataset | Epochs | Runs | Purpose |
 |-------|---------|--------|------|---------|
-| **2A** | COCO 30K subset | 36 | 18 | Hyperparameter search, method selection |
+| **2A** | COCO 30K subset | 36 | 23 | Hyperparameter search, method selection (incl. schedule-shape ablation and 2× baseline control) |
 | **2D** | Full COCO 118K | 72 | ~8 | Final paper numbers |
 | **2E** | Full COCO 118K | 72 | 3 seeds | Statistical reliability (mean ± std) |
 
@@ -448,7 +455,36 @@ Pretrained weights: [PaddleDetection RT-DETR](https://github.com/PaddlePaddle/Pa
 - [x] `scripts/download_coco_full.sh`
 - [x] `scripts/run_final.sh` skeleton
 
-### Phase 2A — Ablation (30K subset, 36 epochs)
+### Phase 1b — Quality & rigor upgrade (2026-05-23)
+- [x] `tools/train_kd.py` — expand `--kd-type` choices to all 7 KD types + `none`
+- [x] `tools/train_kd.py` — support flat (`kd_type:`) and nested (`kd:`) YAML schemas
+- [x] `tools/train_kd.py` — thread `tau`, `mask_ratio`, `total_epochs`, `schedule`, etc.
+- [x] `tools/train_kd.py` — teacher state-dict missing-keys gate (`--teacher-max-missing-ratio`)
+- [x] `tools/train_kd.py` — teacher mAP sanity gate (`--teacher-min-map`, default 0.0; recommended 0.45 for canonical teacher)
+- [x] `tools/train_kd.py` — `--teacher-source {own,lyuwenyu}` flag + `--lyuwenyu-cfg`
+- [x] `src/models/rtdetr_teacher.py` — lyuwenyu/RT-DETR adapter
+- [x] `third_party/RT-DETR` — git submodule (canonical teacher source)
+- [x] `tools/verify_teacher_kd.py` — pre-flight cross-architecture KD smoke
+- [x] `tools/aggregate_results.py` — CSV + Markdown table; `--seed-aggregate` for Phase 2E
+- [x] `tools/export_trt.py` — full ONNX → TRT FP32/FP16/INT8 with INT8 entropy calibrator + latency benchmark
+- [x] `src/trainer_kd.py` — replace argmax decoding with DETR-style top-k (Q*C)
+- [x] `tools/eval.py` — same; modernize `torch.cuda.amp` → `torch.amp`
+- [x] `src/distillation/feature_kd.py` — replace duplicate `Conv1d` branch with `nn.Identity`
+- [x] `src/distillation/stage_adaptive_kd.py` — add `schedule` param: cosine/linear/step/sigmoid/inverse_cosine
+- [x] `configs/kd/stage_adaptive_{linear,step,sigmoid,inv_cosine}_kd.yml`
+- [x] `scripts/run_ablation.sh` — 23 runs (added 18-21 schedule shapes + 22 2×-epoch baseline control)
+- [x] `scripts/run_ablation.sh`, `scripts/run_final.sh` — mkdir-before-tee fix
+- [x] `scripts/download_coco_subset.sh` — remove duplicate unguarded heredoc
+- [x] `tests/test_kd_losses.py` — smoke test per KD type + schedule + invalid-input rejection
+- [x] `tests/test_models.py` — RTDETR shape + frozen-teacher isolation + top-k decode
+- [x] `tests/conftest.py` — shared fixtures (CPU, tiny tensors)
+- [x] `.github/workflows/ci.yml` — pytest on every push (CPU-only)
+- [x] README §3.2 implementation-differences section
+- [x] README Models table — split teacher (canonical) vs student (simplified)
+- [x] README — Query-KD differentiation vs DETRDistill / MimicDet
+- [x] README — top-k eval-protocol statement
+
+### Phase 2A — Ablation (30K subset, 36 epochs, 23 runs)
 - [ ] run00 baseline
 - [ ] run01–06 logit-KD
 - [ ] run07–08 feature-KD
@@ -460,7 +496,12 @@ Pretrained weights: [PaddleDetection RT-DETR](https://github.com/PaddlePaddle/Pa
 - [ ] run14 CWD
 - [ ] run15 MGD
 - [ ] run16 Query-KD
-- [ ] run17 Stage-Adaptive
+- [ ] run17 Stage-Adaptive (cosine)
+- [ ] run18 Stage-Adaptive (linear)
+- [ ] run19 Stage-Adaptive (step)
+- [ ] run20 Stage-Adaptive (sigmoid)
+- [ ] run21 Stage-Adaptive (inverse cosine — curriculum-direction control)
+- [ ] run22 Baseline 2× epochs (reviewer control: "does KD beat training longer?")
 - [ ] Save attention maps for each run
 - [ ] Select top 5 configs → prepare Phase 2D list
 

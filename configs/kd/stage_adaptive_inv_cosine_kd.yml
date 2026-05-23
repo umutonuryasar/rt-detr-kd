@@ -1,0 +1,8 @@
+kd_type: stage_adaptive
+kd_lambda: 1.0
+temperature: 4
+alpha: 0.5
+schedule: inverse_cosine
+# Curriculum-direction control: w_feat = sin(π e / 2E), 0 → 1.
+# This run is the sanity check — if it performs comparably to the default
+# cosine schedule, the curriculum direction is not what drives the effect.
