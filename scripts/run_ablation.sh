@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
-# Run all 23 ablation configurations for the RT-DETR KD project (Phase 2A).
+# Run 6 focused ablation configurations for the RT-DETR KD project (Phase 2A).
 #
-# Ablation grid:
+# Ablation grid (production-oriented showcase):
 #   Run 0  : Baseline (no KD)
-#   Run 1-6: Logit-KD  (λ ∈ {0.5, 1.0} × T ∈ {2, 4, 8})
-#   Run 7-8: Feature-KD (λ ∈ {0.5, 1.0})
-#   Run 9  : Combined-KD (logit + feature, λ=1.0, T=4)
-#   Run 10 : Encoder-only partial KD (MSE only, λ=1.0)
-#   Run 11 : Attention-only partial KD (cosine only, λ=1.0)
-#   Run 12 : Feature-KD, teacher=R34 (capacity analysis)
-#   Run 13 : Feature-KD, teacher=R50 (capacity upper bound)
+#   Run 5  : Logit-KD  (λ=1.0, T=4)
+#   Run 8  : Feature-KD (λ=1.0)
 #   Run 14 : CWD (Channel-Wise Distillation, ICCV'21 baseline)
-#   Run 15 : MGD (Masked Generative Distillation, ECCV'22 baseline)
 #   Run 16 : Query-KD (novel: decoder object query distillation)
 #   Run 17 : Stage-Adaptive KD, cosine schedule (novel: curriculum weighting)
-#   Run 18 : Stage-Adaptive KD, linear schedule          (schedule ablation)
-#   Run 19 : Stage-Adaptive KD, step schedule           (schedule ablation)
-#   Run 20 : Stage-Adaptive KD, sigmoid schedule        (schedule ablation)
-#   Run 21 : Stage-Adaptive KD, inverse-cosine schedule (curriculum-direction control)
-#   Run 22 : Baseline, 2x training length (72 epochs, no KD) — "does KD beat training longer?"
 #
 # Usage:
 #   bash scripts/run_ablation.sh [COCO_ROOT] [OUTPUT_ROOT]
 #
 # Prerequisites:
 #   - COCO data downloaded (see scripts/download_coco_subset.sh)
-#   - Teacher weights available at $TEACHER_WEIGHTS / $TEACHER_WEIGHTS_R34
+#   - Teacher weights available at $TEACHER_WEIGHTS
 
 set -euo pipefail
 
@@ -35,7 +24,6 @@ OUTPUT_ROOT="${2:-runs}"
 STUDENT_CFG="configs/rtdetr_r18vd_coco.yml"
 TEACHER_CFG="configs/rtdetr_r50vd_coco.yml"
 TEACHER_WEIGHTS="${TEACHER_WEIGHTS:-}"      # R50 teacher weights (set externally)
-TEACHER_WEIGHTS_R34="${TEACHER_WEIGHTS_R34:-}"  # R34 teacher weights (set externally)
 
 # ---- Teacher source (B1 cross-architecture KD vs. own simplified teacher) ----
 # Set TEACHER_SOURCE=lyuwenyu to use the canonical RT-DETR teacher from the
@@ -49,7 +37,6 @@ TEACHER_WEIGHTS_R34="${TEACHER_WEIGHTS_R34:-}"  # R34 teacher weights (set exter
 TEACHER_SOURCE="${TEACHER_SOURCE:-own}"      # own | lyuwenyu
 LYUWENYU_CFG="${LYUWENYU_CFG:-}"
 TEACHER_MIN_MAP="${TEACHER_MIN_MAP:-0.0}"    # 0.0 disables the gate
-TEACHER_MIN_MAP_R34="${TEACHER_MIN_MAP_R34:-$TEACHER_MIN_MAP}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"     # power-user escape hatch
 
 EPOCHS=36
@@ -111,10 +98,6 @@ run_experiment() {
     fi
 
     # ---- Cross-architecture (lyuwenyu) teacher flags ----
-    # Only emitted when this run uses the configured cross-arch teacher.
-    # Run 12 (teacher=R34) intentionally stays on the simplified teacher
-    # because there is no R34 canonical checkpoint with comparable mAP, so
-    # it always uses TEACHER_SOURCE=own regardless of the environment.
     local lyuwenyu_flag=""
     local min_map="${TEACHER_MIN_MAP}"
     if [ "$kd_type" != "none" ] \
@@ -125,11 +108,6 @@ run_experiment() {
             exit 1
         fi
         lyuwenyu_flag="--teacher-source lyuwenyu --lyuwenyu-cfg $LYUWENYU_CFG"
-    else
-        # R34-teacher path uses its own gate threshold (usually 0.0)
-        if [ "$teacher_cfg" != "$TEACHER_CFG" ]; then
-            min_map="${TEACHER_MIN_MAP_R34}"
-        fi
     fi
 
     local map_gate_flag=""
@@ -194,48 +172,15 @@ echo ""
 # ---- Run 0: Baseline (no KD) ----
 run_experiment 0 "none" "0.0" "4" "run00_baseline"
 
-# ---- Runs 1-6: Logit-KD ----
-# lambda=0.5
-run_experiment 1 "logit" "0.5" "2" "run01_logit_l0.5_t2"
-run_experiment 2 "logit" "0.5" "4" "run02_logit_l0.5_t4"
-run_experiment 3 "logit" "0.5" "8" "run03_logit_l0.5_t8"
-
-# lambda=1.0
-run_experiment 4 "logit" "1.0" "2" "run04_logit_l1.0_t2"
+# ---- Run 5: Logit-KD (λ=1.0, T=4) ----
 run_experiment 5 "logit" "1.0" "4" "run05_logit_l1.0_t4"
-run_experiment 6 "logit" "1.0" "8" "run06_logit_l1.0_t8"
 
-# ---- Runs 7-8: Feature-KD ----
-run_experiment 7 "feature" "0.5" "4" "run07_feature_l0.5"
+# ---- Run 8: Feature-KD (λ=1.0) ----
 run_experiment 8 "feature" "1.0" "4" "run08_feature_l1.0"
-
-# ---- Run 9: Combined-KD (logit + feature) ----
-run_experiment 9 "combined" "1.0" "4" "run09_combined_l1.0_t4" \
-    "configs/kd/combined_kd.yml"
-
-# ---- Run 10: Encoder-only partial KD ----
-run_experiment 10 "feature" "1.0" "4" "run10_encoder_only_l1.0" \
-    "configs/kd/encoder_only_kd.yml"
-
-# ---- Run 11: Attention-only partial KD ----
-run_experiment 11 "feature" "1.0" "4" "run11_attention_only_l1.0" \
-    "configs/kd/attention_only_kd.yml"
-
-# ---- Run 12: Feature-KD, teacher=R34 (capacity analysis) ----
-run_experiment 12 "feature" "1.0" "4" "run12_feature_teacher_r34" \
-    "" "configs/rtdetr_r34vd_coco.yml" "$TEACHER_WEIGHTS_R34"
-
-# ---- Run 13: Feature-KD, teacher=R50 (capacity upper bound) ----
-run_experiment 13 "feature" "1.0" "4" "run13_feature_teacher_r50" \
-    "" "$TEACHER_CFG" "$TEACHER_WEIGHTS"
 
 # ---- Run 14: CWD (Channel-Wise Distillation, ICCV'21 baseline) ----
 run_experiment 14 "cwd" "1.0" "4" "run14_cwd_l1.0" \
     "configs/kd/cwd_kd.yml"
-
-# ---- Run 15: MGD (Masked Generative Distillation, ECCV'22 baseline) ----
-run_experiment 15 "mgd" "1.0" "4" "run15_mgd_l1.0" \
-    "configs/kd/mgd_kd.yml"
 
 # ---- Run 16: Query-KD (novel: decoder object query distillation) ----
 run_experiment 16 "query" "1.0" "4" "run16_query_kd_l1.0" \
@@ -244,31 +189,6 @@ run_experiment 16 "query" "1.0" "4" "run16_query_kd_l1.0" \
 # ---- Run 17: Stage-Adaptive KD, cosine (novel: curriculum weighting) ----
 run_experiment 17 "stage_adaptive" "1.0" "4" "run17_stage_adaptive_cosine" \
     "configs/kd/stage_adaptive_kd.yml"
-
-# ---- Run 18: Stage-Adaptive KD, linear schedule (schedule ablation) ----
-run_experiment 18 "stage_adaptive" "1.0" "4" "run18_stage_adaptive_linear" \
-    "configs/kd/stage_adaptive_linear_kd.yml"
-
-# ---- Run 19: Stage-Adaptive KD, step schedule (schedule ablation) ----
-run_experiment 19 "stage_adaptive" "1.0" "4" "run19_stage_adaptive_step" \
-    "configs/kd/stage_adaptive_step_kd.yml"
-
-# ---- Run 20: Stage-Adaptive KD, sigmoid schedule (schedule ablation) ----
-run_experiment 20 "stage_adaptive" "1.0" "4" "run20_stage_adaptive_sigmoid" \
-    "configs/kd/stage_adaptive_sigmoid_kd.yml"
-
-# ---- Run 21: Stage-Adaptive KD, inverse-cosine (curriculum-direction control) ----
-# If this performs comparably to run17, the curriculum DIRECTION is not what
-# drives the effect — important sanity check for the paper.
-run_experiment 21 "stage_adaptive" "1.0" "4" "run21_stage_adaptive_inv_cosine" \
-    "configs/kd/stage_adaptive_inv_cosine_kd.yml"
-
-# ---- Run 22: Baseline, 2x epochs (reviewer control: "does KD beat training longer?") ----
-LONG_EPOCHS=$((EPOCHS * 2))
-EPOCHS_SAVED=$EPOCHS
-EPOCHS=$LONG_EPOCHS
-run_experiment 22 "none" "0.0" "4" "run22_baseline_2x_epochs"
-EPOCHS=$EPOCHS_SAVED
 
 # ---- Summary ----
 ABLATION_END=$(date +%s)

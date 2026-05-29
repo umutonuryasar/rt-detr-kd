@@ -1,0 +1,19 @@
+services:
+  rtdetr-serve:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount a local weights/ directory so you can swap checkpoints without rebuilding
+      - ./weights:/weights:ro
+    environment:
+      MODEL_PATH: /weights/checkpoint_best.pth
+      MODEL_CFG:  configs/rtdetr_r18vd_coco.yml
+      SCORE_THRESH: "0.3"
+      IMG_SIZE: "640"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
