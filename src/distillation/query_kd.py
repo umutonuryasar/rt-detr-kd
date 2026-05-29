@@ -53,9 +53,9 @@ class QueryKDLoss(nn.Module):
         # Project student queries to teacher dimension if needed
         if student_dim != teacher_dim:
             self.proj = nn.Linear(student_dim, teacher_dim, bias=False)
+            nn.init.xavier_uniform_(self.proj.weight)
         else:
-            self.proj = nn.Linear(student_dim, teacher_dim, bias=False)
-        nn.init.xavier_uniform_(self.proj.weight)
+            self.proj = nn.Identity()
 
     def forward(
         self,

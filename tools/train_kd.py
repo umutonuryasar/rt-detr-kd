@@ -491,7 +491,7 @@ def main() -> None:
             def __init__(self, nc):
                 super().__init__()
                 self.det_loss = RTDETRLoss(num_classes=nc)
-            def forward(self, model_outputs, targets):
+            def forward(self, model_outputs, targets, epoch: int = 0):
                 # For baseline, model_outputs is the raw dict from RTDETR
                 losses = self.det_loss(model_outputs, targets)
                 losses["loss_total"] = losses["loss_det"]

@@ -278,7 +278,7 @@ class KDTrainer:
             # Mixed-precision forward pass
             with autocast('cuda', enabled=self.use_amp):
                 outputs = self.model(images)
-                losses = self.loss_fn(outputs, targets)
+                losses = self.loss_fn(outputs, targets, epoch=epoch)
                 loss = losses["loss_total"] / self.accumulate_steps
 
             # Backward
