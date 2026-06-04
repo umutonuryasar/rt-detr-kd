@@ -314,6 +314,7 @@ def _teacher_map_gate(
         return 0.0
 
     from src.data.coco_dataset import _COCO_CATEGORIES_80
+    from src.trainer_kd import _topk_decode
     from torch.amp import autocast
 
     idx_to_coco_id = {i: cid for i, cid in enumerate(_COCO_CATEGORIES_80)}
@@ -328,7 +329,12 @@ def _teacher_map_gate(
             images = images.to(device)
             with autocast('cuda', enabled=use_amp and device.type == "cuda"):
                 outputs = teacher(images)
-            scores, labels = outputs["pred_logits"].sigmoid().max(dim=-1)
+            # Use the same top-k decode as the training evaluator so the mAP
+            # gate threshold is comparable to reported numbers.  Argmax-per-query
+            # underestimates multi-label predictions and can abort valid setups.
+            scores, labels, decoded_boxes = _topk_decode(
+                outputs["pred_logits"], outputs["pred_boxes"], top_k=100
+            )
             for i in range(images.size(0)):
                 if images_seen >= num_images:
                     break
@@ -339,10 +345,10 @@ def _teacher_map_gate(
                 orig_h, orig_w = targets[i]["orig_size"]
                 if isinstance(orig_h, torch.Tensor):
                     orig_h, orig_w = orig_h.item(), orig_w.item()
-                cx = outputs["pred_boxes"][i, :, 0] * orig_w
-                cy = outputs["pred_boxes"][i, :, 1] * orig_h
-                bw = outputs["pred_boxes"][i, :, 2] * orig_w
-                bh = outputs["pred_boxes"][i, :, 3] * orig_h
+                cx = decoded_boxes[i, :, 0] * orig_w
+                cy = decoded_boxes[i, :, 1] * orig_h
+                bw = decoded_boxes[i, :, 2] * orig_w
+                bh = decoded_boxes[i, :, 3] * orig_h
                 x0 = (cx - bw / 2).clamp(min=0)
                 y0 = (cy - bh / 2).clamp(min=0)
                 for j in range(scores.size(1)):
@@ -457,16 +463,26 @@ def main() -> None:
 
     if args.student_weights:
         logger.info(f"Loading student weights from: {args.student_weights}")
-        ckpt = torch.load(args.student_weights, map_location="cpu")
+        ckpt = torch.load(args.student_weights, map_location="cpu", weights_only=False)
         state = ckpt.get("model_state_dict", ckpt)
-        student.load_state_dict(state, strict=False)
+        missing, unexpected = student.load_state_dict(state, strict=False)
+        if missing:
+            logger.info(f"  student weight load: {len(missing)} missing keys (backbone-only weights?)")
+        if unexpected:
+            logger.info(f"  student weight load: {len(unexpected)} unexpected keys")
 
     # ---- Build loss ----
     num_classes = cfg["model"].get("num_classes", 80)
     hidden_dim = cfg["model"].get("hidden_dim", 256)
-    teacher_hidden_dim = teacher_cfg_dict.get("model", teacher_cfg_dict).get(
-        "hidden_dim", hidden_dim
-    )
+    # For the lyuwenyu teacher the hidden_dim lives in their YAML, not in our
+    # teacher_cfg_dict. Read it from the model object if available.
+    if effective_kd_type != "none":
+        teacher_hidden_dim = getattr(
+            teacher, "hidden_dim",
+            teacher_cfg_dict.get("model", teacher_cfg_dict).get("hidden_dim", hidden_dim),
+        )
+    else:
+        teacher_hidden_dim = hidden_dim
 
     if effective_kd_type != "none":
         loss_fn = KDLoss(
@@ -592,16 +608,28 @@ def main() -> None:
         device=device,
     )
 
-    # Resume from checkpoint if student weights provided
+    # Resume from a full trainer checkpoint (has epoch / optimizer / scaler).
+    # Backbone-only weight files (no 'epoch' key) fall back gracefully: model
+    # was already loaded above with strict=False; start_epoch stays 0.
     start_epoch = 0
     if args.student_weights and os.path.exists(args.student_weights):
         try:
-            start_epoch = trainer.load_checkpoint(args.student_weights)
-        except Exception:
-            pass  # weights may be backbone-only; model already loaded above
+            ckpt_probe = torch.load(
+                args.student_weights, map_location="cpu", weights_only=False
+            )
+            if isinstance(ckpt_probe, dict) and "epoch" in ckpt_probe:
+                start_epoch = trainer.load_checkpoint(args.student_weights)
+            else:
+                logger.info(
+                    "Student weights appear to be a bare state-dict (no 'epoch' key); "
+                    "optimizer/scaler state not restored. Training from epoch 1."
+                )
+        except Exception as exc:
+            logger.warning(f"Could not fully load checkpoint for resume: {exc}. "
+                           "Model weights were loaded earlier; continuing from epoch 1.")
 
     logger.info(f"Starting from epoch {start_epoch + 1}")
-    trainer.train(args.epochs)
+    trainer.train(args.epochs, start_epoch=start_epoch)
 
 
 if __name__ == "__main__":

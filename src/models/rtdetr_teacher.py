@@ -183,9 +183,10 @@ class RTDETRTeacher(nn.Module):
                               attention does not produce a dense map)
     """
 
-    def __init__(self, inner: nn.Module):
+    def __init__(self, inner: nn.Module, hidden_dim: int = 256):
         super().__init__()
         self.inner = inner
+        self.hidden_dim = hidden_dim
 
         # KD-interface attributes
         self.encoder_output: Optional[torch.Tensor] = None
@@ -328,6 +329,14 @@ def build_lyuwenyu_teacher(
         cfg = YAMLConfig(config)
         inner = cfg.model
 
+        # Probe the inner model for its hidden_dim (needed by KDLoss projection).
+        # Their RTDETRTransformer stores it as hidden_dim; fall back to 256.
+        _hidden_dim = 256
+        for _obj in (inner, getattr(inner, 'decoder', None), getattr(inner, 'transformer', None)):
+            if _obj is not None and hasattr(_obj, 'hidden_dim'):
+                _hidden_dim = int(_obj.hidden_dim)
+                break
+
         if checkpoint is not None:
             # weights_only=False is required because their checkpoints
             # pickle the entire optimizer/EMA state, not just tensors.
@@ -351,4 +360,4 @@ def build_lyuwenyu_teacher(
                     f"{len(unexpected)} unexpected keys."
                 )
 
-    return RTDETRTeacher(inner)
+    return RTDETRTeacher(inner, hidden_dim=_hidden_dim)

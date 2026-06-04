@@ -138,10 +138,11 @@ class RTDETRDecoderLayer(nn.Module):
         q = queries if query_pos is None else queries + query_pos
         k = q  # self-attention: key = query
 
-        # 1. Self-attention (pre-norm)
+        # 1. Self-attention (pre-norm) — Q/K add pos, V must not (standard DETR)
         residual = queries
-        q_norm = self.norm1(q)
-        sa_out, _ = self.self_attn(q_norm, q_norm, q_norm)
+        q_norm = self.norm1(q)        # Q and K include positional offset
+        v_norm = self.norm1(queries)  # V uses content only, no positional offset
+        sa_out, _ = self.self_attn(q_norm, q_norm, v_norm)
         queries = residual + self.drop1(sa_out)
 
         # 2. Cross-attention (pre-norm)
@@ -158,7 +159,9 @@ class RTDETRDecoderLayer(nn.Module):
             average_attn_weights=False,  # keep per-head weights
         )
         # attn_w shape: [B, nhead, num_queries, N_mem]
-        self.cross_attn_weights = attn_w.detach()
+        # Keep the computation graph intact so attention-KD losses (runs 10/11/16)
+        # can backprop through QK projections.
+        self.cross_attn_weights = attn_w
         queries = residual + self.drop2(ca_out)
 
         # 3. Feed-forward (pre-norm)

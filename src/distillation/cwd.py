@@ -71,14 +71,16 @@ class CWDLoss(nn.Module):
         s_norm = F.log_softmax(s / self.tau, dim=-1)   # log-probs for KLDiv input
         t_norm = F.softmax(t.detach() / self.tau, dim=-1)   # probs for KLDiv target
 
-        # KL divergence summed over channels, averaged over batch
-        # Reshape to [B*D_t, N] for batchmean reduction
+        # KL divergence summed over channels and spatial positions, averaged
+        # over batch.  Using reduction="batchmean" on the [B*D, N] view would
+        # divide by B*D instead of B, making the loss D (=256) times too small.
+        # reduction="sum" / B gives the correct per-sample channel-sum.
         B, D, N = s_norm.shape
         loss = F.kl_div(
             s_norm.reshape(B * D, N),
             t_norm.reshape(B * D, N),
-            reduction="batchmean",
-        )
+            reduction="sum",
+        ) / B
         return loss
 
     def extra_repr(self) -> str:

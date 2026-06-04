@@ -214,16 +214,21 @@ class KDTrainer:
     # Training
     # -----------------------------------------------------------------------
 
-    def train(self, epochs: int) -> None:
+    def train(self, epochs: int, start_epoch: int = 0) -> None:
         """Full training loop.
 
         Args:
-            epochs: Total number of training epochs.
+            epochs:      Total number of epochs to train (inclusive upper bound).
+            start_epoch: Resume offset — training begins at start_epoch + 1.
         """
-        logger.info(f"Starting training for {epochs} epochs. Output dir: {self.output_dir}")
+        remaining = epochs - start_epoch
+        logger.info(
+            f"Starting training: epochs {start_epoch + 1}–{epochs} "
+            f"({remaining} remaining). Output dir: {self.output_dir}"
+        )
         logger.info(f"AMP: {self.use_amp}, accumulate_steps: {self.accumulate_steps}")
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch + 1, epochs + 1):
             epoch_start = time.time()
             train_metrics = self.train_epoch(epoch)
             epoch_time = time.time() - epoch_start
@@ -289,17 +294,18 @@ class KDTrainer:
 
             # Gradient accumulation: only step every accumulate_steps iterations
             if (batch_idx + 1) % self.accumulate_steps == 0:
+                # Clip grads for both model and KD projection layers (in loss_fn)
+                all_params = (
+                    list(self.model.parameters())
+                    + list(self.loss_fn.parameters())
+                )
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
-                    nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.clip_max_norm
-                    )
+                    nn.utils.clip_grad_norm_(all_params, self.clip_max_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.clip_max_norm
-                    )
+                    nn.utils.clip_grad_norm_(all_params, self.clip_max_norm)
                     self.optimizer.step()
 
                 self.optimizer.zero_grad()
@@ -458,6 +464,7 @@ class KDTrainer:
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": model_to_save.state_dict(),
+            "loss_fn_state_dict": self.loss_fn.state_dict(),  # KD projection weights
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_map": self.best_map,
             "cfg": self.cfg,
@@ -480,10 +487,18 @@ class KDTrainer:
         Returns:
             Epoch number from the checkpoint.
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         model_to_load = getattr(self.model, "student", self.model)
-        model_to_load.load_state_dict(checkpoint["model_state_dict"])
+        missing, unexpected = model_to_load.load_state_dict(
+            checkpoint["model_state_dict"], strict=False
+        )
+        if missing:
+            logger.warning(f"load_checkpoint: {len(missing)} missing model keys")
+        if unexpected:
+            logger.warning(f"load_checkpoint: {len(unexpected)} unexpected model keys")
 
+        if "loss_fn_state_dict" in checkpoint:
+            self.loss_fn.load_state_dict(checkpoint["loss_fn_state_dict"], strict=False)
         if load_optimizer and "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if self.scaler is not None and "scaler_state_dict" in checkpoint:

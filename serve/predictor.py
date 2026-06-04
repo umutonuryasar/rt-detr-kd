@@ -87,8 +87,10 @@ class RTDETRPredictor:
 
         self.model = build_rtdetr(cfg)
 
-        # Load weights — supports both bare state-dicts and trainer_kd checkpoints
-        ckpt  = torch.load(model_path, map_location="cpu", weights_only=False)
+        # Load weights — supports both bare state-dicts and trainer_kd checkpoints.
+        # weights_only=True prevents arbitrary code execution during unpickling.
+        # Our checkpoints store only basic Python types + tensors, so this is safe.
+        ckpt  = torch.load(model_path, map_location="cpu", weights_only=True)
         state = ckpt.get("model_state_dict", ckpt)
         missing, unexpected = self.model.load_state_dict(state, strict=False)
         if missing:
