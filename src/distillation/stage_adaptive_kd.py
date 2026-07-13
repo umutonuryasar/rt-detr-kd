@@ -102,6 +102,8 @@ class StageAdaptiveKDLoss(nn.Module):
         teacher_logits: torch.Tensor,
         student_attn: Optional[torch.Tensor] = None,
         teacher_attn: Optional[torch.Tensor] = None,
+        student_shapes: Optional[list[tuple[int, int]]] = None,
+        teacher_shapes: Optional[list[tuple[int, int]]] = None,
     ) -> dict[str, torch.Tensor]:
         """Compute stage-adaptive KD loss.
 
@@ -113,6 +115,10 @@ class StageAdaptiveKDLoss(nn.Module):
             teacher_logits: [B, Q_t, num_classes] — teacher class logits (detached).
             student_attn:   [L, B, H, Q_s, N_s] or None.
             teacher_attn:   [L, B, H, Q_t, N_t] or None.
+            student_shapes: Per-scale (H, W) list for the student encoder
+                            sequence (enables correct per-scale alignment
+                            inside the feature component).
+            teacher_shapes: Per-scale (H, W) list for the teacher sequence.
 
         Returns:
             Dict with scalar losses:
@@ -126,7 +132,8 @@ class StageAdaptiveKDLoss(nn.Module):
         w_feat, w_logit = self._weights(epoch)
 
         feat_losses = self.feature_loss(
-            student_enc, teacher_enc, student_attn, teacher_attn
+            student_enc, teacher_enc, student_attn, teacher_attn,
+            student_shapes=student_shapes, teacher_shapes=teacher_shapes,
         )
         loss_logit = self.logit_loss(student_logits, teacher_logits)
 

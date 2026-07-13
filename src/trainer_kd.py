@@ -159,10 +159,18 @@ class KDTrainer:
         optimizer:     Optimizer (built externally or via build_optimizer).
         scheduler:     LR scheduler (step per iteration).
         train_loader:  DataLoader for training set.
-        val_loader:    DataLoader for validation set.
+        val_loader:    DataLoader for validation set (held-out, reported).
         cfg:           Full config dict including 'train' and 'checkpoint' sub-dicts.
         device:        torch.device for training.
         scaler:        GradScaler for AMP (created automatically if None and use_amp=True).
+        select_loader: Optional DataLoader for a model-selection split carved
+                       out of the training data. When provided, per-epoch
+                       evaluation and best-checkpoint selection use THIS
+                       split, and the held-out val set is evaluated only once
+                       at the end of training — keeping the reported set
+                       untouched by model selection.
+        select_ann_file: COCO annotation JSON for the selection split
+                       (required when select_loader is given).
     """
 
     def __init__(
@@ -176,6 +184,8 @@ class KDTrainer:
         cfg: dict,
         device: torch.device,
         scaler: Optional[GradScaler] = None,
+        select_loader: Optional[DataLoader] = None,
+        select_ann_file: Optional[str] = None,
     ):
         self.model = model.to(device)
         self.loss_fn = loss_fn.to(device)
@@ -209,6 +219,12 @@ class KDTrainer:
         # COCO val annotation file (needed for pycocotools evaluation)
         data_cfg = cfg.get("data", {})
         self.val_ann_file = data_cfg.get("val_ann", None)
+
+        # Optional model-selection split (see class docstring).
+        self.select_loader = select_loader
+        self.select_ann_file = select_ann_file
+        if select_loader is not None and select_ann_file is None:
+            raise ValueError("select_loader given without select_ann_file")
 
     # -----------------------------------------------------------------------
     # Training
@@ -248,17 +264,35 @@ class KDTrainer:
             if epoch % self.save_every == 0:
                 self.save_checkpoint(epoch, tag=f"epoch_{epoch:04d}")
 
-            # Evaluation
-            map_score = self.evaluate(epoch)
-            self.writer.add_scalar("val/mAP", map_score, epoch)
-            logger.info(f"  mAP@[.5:.95] = {map_score:.4f}")
+            # Evaluation. With a selection split, per-epoch eval and
+            # best-checkpoint selection use the selection split; the held-out
+            # val set stays untouched until the final report below.
+            if self.select_loader is not None:
+                map_score = self.evaluate(
+                    epoch, loader=self.select_loader, ann_file=self.select_ann_file
+                )
+                self.writer.add_scalar("select/mAP", map_score, epoch)
+                logger.info(f"  select mAP@[.5:.95] = {map_score:.4f}")
+            else:
+                map_score = self.evaluate(epoch)
+                self.writer.add_scalar("val/mAP", map_score, epoch)
+                logger.info(f"  mAP@[.5:.95] = {map_score:.4f}")
 
             if map_score > self.best_map:
                 self.best_map = map_score
                 self.save_checkpoint(epoch, tag="best")
-                logger.info(f"  New best mAP: {self.best_map:.4f}")
+                logger.info(f"  New best (selection) mAP: {self.best_map:.4f}")
 
-        logger.info(f"Training complete. Best mAP: {self.best_map:.4f}")
+        if self.select_loader is not None:
+            logger.info("Final held-out evaluation on the val set...")
+            final_val_map = self.evaluate(epochs)
+            self.writer.add_scalar("val/mAP_final", final_val_map, epochs)
+            logger.info(
+                f"Training complete. Best selection mAP: {self.best_map:.4f} | "
+                f"held-out val mAP (last epoch): {final_val_map:.4f}"
+            )
+        else:
+            logger.info(f"Training complete. Best mAP: {self.best_map:.4f}")
         self.writer.close()
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
@@ -345,19 +379,29 @@ class KDTrainer:
     # -----------------------------------------------------------------------
 
     @torch.no_grad()
-    def evaluate(self, epoch: int = 0) -> float:
-        """Run COCO evaluation on the validation set.
+    def evaluate(self, epoch: int = 0, loader: Optional[DataLoader] = None,
+                 ann_file: Optional[str] = None) -> float:
+        """Run COCO evaluation.
+
+        Args:
+            epoch:    Epoch number (used for the temp results filename).
+            loader:   DataLoader to evaluate on (defaults to self.val_loader).
+            ann_file: COCO annotation JSON matching ``loader``
+                      (defaults to self.val_ann_file).
 
         Returns:
             mAP@[0.5:0.95] (primary COCO metric). Returns 0.0 if pycocotools
-            is not available or val_ann_file is not set.
+            is not available or the annotation file is not set.
         """
-        if COCO is None or self.val_ann_file is None:
-            logger.warning("pycocotools or val_ann_file not available; skipping eval.")
+        loader = loader if loader is not None else self.val_loader
+        ann_file = ann_file if ann_file is not None else self.val_ann_file
+
+        if COCO is None or ann_file is None:
+            logger.warning("pycocotools or annotation file not available; skipping eval.")
             return 0.0
 
-        if not os.path.exists(self.val_ann_file):
-            logger.warning(f"Annotation file not found: {self.val_ann_file}")
+        if not os.path.exists(ann_file):
+            logger.warning(f"Annotation file not found: {ann_file}")
             return 0.0
 
         self.model.eval()
@@ -365,7 +409,7 @@ class KDTrainer:
         eval_model = getattr(self.model, "student", self.model)
         eval_model.eval()
 
-        coco_gt = COCO(self.val_ann_file)
+        coco_gt = COCO(ann_file)
 
         # Build reverse mapping: contiguous 0..79 -> COCO category IDs
         from .data.coco_dataset import _COCO_CATEGORIES_80
@@ -373,7 +417,7 @@ class KDTrainer:
 
         results = []
 
-        for images, targets in self.val_loader:
+        for images, targets in loader:
             images = images.to(self.device)
 
             with autocast('cuda', enabled=self.use_amp):

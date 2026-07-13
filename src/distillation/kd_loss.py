@@ -3,12 +3,18 @@
 L_total = L_det + kd_lambda * L_KD
 
 Supports seven distillation strategies:
-  logit          — KL divergence on classification logits (Hinton et al., 2015)
+  logit          — KL on classification logits. Default mode is per-class
+                   *binary* KL (matches RT-DETR's sigmoid-focal training);
+                   Hinton-style softmax KL is available via logit_mode for
+                   ablation.
   feature        — Encoder MSE + decoder cross-attention cosine similarity
   combined       — Logit + Feature simultaneously, with tunable weights
-  cwd            — Channel-Wise Distillation (Yang et al., ICCV 2021)
+  cwd            — Channel-Wise Distillation (Shu et al., ICCV 2021)
   mgd            — Masked Generative Distillation (Yang et al., ECCV 2022)
-  query          — Decoder object query distillation (novel, RT-DETR-specific)
+  query          — Decoder object query distillation (novel, RT-DETR-specific).
+                   Uses per-image Hungarian matching in prediction space by
+                   default; legacy index-wise truncation available via
+                   query_matching="index" for ablation.
   stage_adaptive — Cosine curriculum shift from feature to logit (novel)
 
 All individual loss components are returned in the output dict so every term
@@ -49,6 +55,8 @@ class KDLoss(nn.Module):
         tau:            Spatial softmax temperature for CWD.
         mask_ratio:     Token mask ratio for MGD.
         total_epochs:   Total training epochs for stage_adaptive schedule.
+        logit_mode:     "binary" (default) or "softmax" — see LogitKDLoss.
+        query_matching: "hungarian" (default) or "index" — see QueryKDLoss.
     """
 
     def __init__(
@@ -67,6 +75,8 @@ class KDLoss(nn.Module):
         mask_ratio: float = 0.75,
         total_epochs: int = 36,
         schedule: str = "cosine",
+        logit_mode: str = "binary",
+        query_matching: str = "hungarian",
     ):
         super().__init__()
         if kd_type not in SUPPORTED_KD_TYPES:
@@ -82,7 +92,7 @@ class KDLoss(nn.Module):
         self.detection_loss = RTDETRLoss(num_classes=num_classes)
 
         if kd_type == "logit":
-            self.kd_loss_fn = LogitKDLoss(temperature=temperature)
+            self.kd_loss_fn = LogitKDLoss(temperature=temperature, mode=logit_mode)
 
         elif kd_type == "feature":
             self.kd_loss_fn = FeatureKDLoss(
@@ -93,7 +103,7 @@ class KDLoss(nn.Module):
             )
 
         elif kd_type == "combined":
-            self.logit_loss_fn = LogitKDLoss(temperature=temperature)
+            self.logit_loss_fn = LogitKDLoss(temperature=temperature, mode=logit_mode)
             self.feature_loss_fn = FeatureKDLoss(
                 student_dim=student_dim,
                 teacher_dim=teacher_dim,
@@ -120,6 +130,7 @@ class KDLoss(nn.Module):
                 student_dim=student_dim,
                 teacher_dim=teacher_dim,
                 alpha=alpha,
+                matching=query_matching,
             )
 
         elif kd_type == "stage_adaptive":
@@ -129,7 +140,7 @@ class KDLoss(nn.Module):
                 alpha=alpha,
                 feat_weight=feat_weight,
             )
-            logit_loss = LogitKDLoss(temperature=temperature)
+            logit_loss = LogitKDLoss(temperature=temperature, mode=logit_mode)
             self.kd_loss_fn = StageAdaptiveKDLoss(
                 feature_loss=feature_loss,
                 logit_loss=logit_loss,
@@ -155,6 +166,8 @@ class KDLoss(nn.Module):
                 'teacher_attn':    [L, B, H, Q_t, N_t] or None
                 'student_queries': [B, Q_s, D_s] or None
                 'teacher_queries': [B, Q_t, D_t] or None
+                'student_scale_shapes': list[(H, W)] or None (per encoder scale)
+                'teacher_scale_shapes': list[(H, W)] or None
             targets: List of B dicts with 'labels' and 'boxes'.
             epoch:   Current training epoch (used by stage_adaptive only).
 
@@ -170,6 +183,25 @@ class KDLoss(nn.Module):
         """
         student_out = model_outputs["student"]
         teacher_out = model_outputs["teacher"]
+        s_shapes = model_outputs.get("student_scale_shapes")
+        t_shapes = model_outputs.get("teacher_scale_shapes")
+
+        # One-time visibility warning: methods that advertise an attention
+        # term silently drop it when the teacher exposes no dense attention
+        # (e.g., the canonical deformable-attention teacher). Make that
+        # explicit in the logs so paper claims match what actually trained.
+        if (
+            not getattr(self, "_warned_no_attn", False)
+            and self.kd_type in ("feature", "combined", "query", "stage_adaptive")
+            and model_outputs.get("teacher_attn") is None
+        ):
+            import logging
+            logging.getLogger(__name__).warning(
+                f"KDLoss(kd_type={self.kd_type}): teacher attention maps are "
+                f"None — the attention-alignment term is INACTIVE for this "
+                f"run. Report equations/configs accordingly."
+            )
+            self._warned_no_attn = True
 
         # ---- Detection loss (student predictions vs ground truth) ----
         det_losses = self.detection_loss(student_out, targets)
@@ -190,6 +222,8 @@ class KDLoss(nn.Module):
                 model_outputs["teacher_enc_out"],
                 model_outputs.get("student_attn"),
                 model_outputs.get("teacher_attn"),
+                student_shapes=s_shapes,
+                teacher_shapes=t_shapes,
             )
             kd_dict = {
                 "loss_feat": feat_losses["loss_feat"],
@@ -207,6 +241,8 @@ class KDLoss(nn.Module):
                 model_outputs["teacher_enc_out"],
                 model_outputs.get("student_attn"),
                 model_outputs.get("teacher_attn"),
+                student_shapes=s_shapes,
+                teacher_shapes=t_shapes,
             )
             loss_kd = self.logit_weight * loss_logit + self.feature_weight * feat_losses["loss_kd"]
             kd_dict = {
@@ -216,7 +252,16 @@ class KDLoss(nn.Module):
                 "loss_kd":    loss_kd,
             }
 
-        elif self.kd_type in ("cwd", "mgd"):
+        elif self.kd_type == "cwd":
+            loss_kd = self.kd_loss_fn(
+                model_outputs["student_enc_out"],
+                model_outputs["teacher_enc_out"],
+                student_shapes=s_shapes,
+                teacher_shapes=t_shapes,
+            )
+            kd_dict = {"loss_kd": loss_kd}
+
+        elif self.kd_type == "mgd":
             loss_kd = self.kd_loss_fn(
                 model_outputs["student_enc_out"],
                 model_outputs["teacher_enc_out"],
@@ -225,10 +270,12 @@ class KDLoss(nn.Module):
 
         elif self.kd_type == "query":
             query_losses = self.kd_loss_fn(
-                model_outputs["student_queries"],
-                model_outputs["teacher_queries"],
+                model_outputs.get("student_queries"),
+                model_outputs.get("teacher_queries"),
                 model_outputs.get("student_attn"),
                 model_outputs.get("teacher_attn"),
+                student_preds=student_out,
+                teacher_preds=teacher_out,
             )
             kd_dict = {
                 "loss_query":      query_losses["loss_query"],
@@ -245,6 +292,8 @@ class KDLoss(nn.Module):
                 teacher_logits=teacher_out["pred_logits"],
                 student_attn=model_outputs.get("student_attn"),
                 teacher_attn=model_outputs.get("teacher_attn"),
+                student_shapes=s_shapes,
+                teacher_shapes=t_shapes,
             )
             kd_dict = {
                 "loss_feat":  sa_losses["loss_feat"],

@@ -117,6 +117,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--schedule", default="cosine",
                    choices=["cosine", "linear", "step", "sigmoid", "inverse_cosine"],
                    help="Weight schedule for stage_adaptive KD.")
+    p.add_argument("--logit-mode", default="binary",
+                   choices=["binary", "softmax"],
+                   help="Logit-KD formulation: 'binary' (per-class sigmoid KL, "
+                        "matches RT-DETR's sigmoid-focal training — default) or "
+                        "'softmax' (legacy Hinton categorical KL, for ablation).")
+    p.add_argument("--query-matching", default="hungarian",
+                   choices=["hungarian", "index"],
+                   help="Query-KD correspondence: 'hungarian' (prediction-space "
+                        "bipartite matching — default) or 'index' (legacy first-K "
+                        "truncation, for ablation).")
 
     # Training
     p.add_argument("--epochs", type=int, default=36)
@@ -141,6 +151,13 @@ def parse_args() -> argparse.Namespace:
                    default="/data/coco/annotations/instances_train2017.json")
     p.add_argument("--val-ann",
                    default="/data/coco/annotations/instances_val2017.json")
+    p.add_argument("--select-img", default=None,
+                   help="Optional image dir for a model-selection split carved "
+                        "from training data. When set (with --select-ann), "
+                        "per-epoch eval + best-checkpoint selection use this "
+                        "split and val is only evaluated once at the end.")
+    p.add_argument("--select-ann", default=None,
+                   help="COCO annotation JSON for the model-selection split.")
     p.add_argument("--num-workers", type=int, default=4)
 
     # Weights
@@ -204,6 +221,8 @@ def build_cfg_from_args(args: argparse.Namespace) -> dict:
         "val_ann": args.val_ann,
         "train_img": args.coco_train,
         "val_img": args.coco_val,
+        "select_ann": args.select_ann,
+        "select_img": args.select_img,
         "num_workers": args.num_workers,
     }
     student_cfg["checkpoint"] = {
@@ -221,6 +240,8 @@ def build_cfg_from_args(args: argparse.Namespace) -> dict:
         "tau": args.tau,
         "mask_ratio": args.mask_ratio,
         "schedule": args.schedule,
+        "logit_mode": args.logit_mode,
+        "query_matching": args.query_matching,
     }
 
     # Optionally load KD-specific YAML override.
@@ -244,6 +265,8 @@ def build_cfg_from_args(args: argparse.Namespace) -> dict:
             "tau": "tau",
             "mask_ratio": "mask_ratio",
             "schedule": "schedule",
+            "logit_mode": "logit_mode",
+            "query_matching": "query_matching",
         }
         for yaml_key, cfg_key in flat_map.items():
             if yaml_key in kd_yaml:
@@ -416,10 +439,22 @@ def main() -> None:
         f"Effective KD config: type={effective_kd_type}, "
         f"lambda={kd_cfg['lambda']}, temperature={kd_cfg['temperature']}, "
         f"alpha={kd_cfg['alpha']}, tau={kd_cfg['tau']}, "
-        f"mask_ratio={kd_cfg['mask_ratio']}, schedule={kd_cfg['schedule']}"
+        f"mask_ratio={kd_cfg['mask_ratio']}, schedule={kd_cfg['schedule']}, "
+        f"logit_mode={kd_cfg.get('logit_mode', 'binary')}, "
+        f"query_matching={kd_cfg.get('query_matching', 'hungarian')}"
     )
 
     # ---- Build models ----
+    # Only these KD methods consume decoder cross-attention maps. For all
+    # others (baseline, logit, cwd, mgd) disable capture: PyTorch can then use
+    # its fused attention fast path and skips storing [L, B, H, Q, N] maps —
+    # meaningful VRAM/speed savings on the 4 GB budget, and it keeps the
+    # baseline's runtime profile clean.
+    _ATTN_KD_TYPES = ("feature", "combined", "query", "stage_adaptive")
+    capture_attn = effective_kd_type in _ATTN_KD_TYPES
+    cfg.setdefault("model", {})["capture_attn"] = capture_attn
+    logger.info(f"Decoder attention capture: {capture_attn} (kd_type={effective_kd_type})")
+
     logger.info("Building student model...")
     student = build_rtdetr(cfg)
     logger.info(f"  Student params: {student.num_parameters:,}")
@@ -500,6 +535,8 @@ def main() -> None:
             teacher_dim=teacher_hidden_dim,
             total_epochs=args.epochs,
             schedule=kd_cfg["schedule"],
+            logit_mode=kd_cfg.get("logit_mode", "binary"),
+            query_matching=kd_cfg.get("query_matching", "hungarian"),
         )
     else:
         # Wrap RTDETRLoss to match KDLoss forward signature
@@ -524,15 +561,30 @@ def main() -> None:
     train_transforms = build_transforms(train=True, img_size=img_size)
     val_transforms = build_transforms(train=False, img_size=img_size)
 
-    train_dataset = COCODetection(
-        img_folder=data_cfg["train_img"],
-        ann_file=data_cfg["train_ann"],
-        transforms=train_transforms,
-    )
-
     if args.mosaic:
+        # MosaicWrapper contract: the wrapped dataset must return RAW PIL
+        # images; the full transform pipeline is applied exactly once (on
+        # the single image, or on the assembled mosaic canvas). Wrapping an
+        # already-transformed dataset would normalize twice and corrupt the
+        # mosaic images.
         logger.info("Mosaic augmentation ENABLED (p=0.5)")
-        train_dataset = MosaicWrapper(train_dataset, img_size=img_size, p=0.5)
+        raw_train_dataset = COCODetection(
+            img_folder=data_cfg["train_img"],
+            ann_file=data_cfg["train_ann"],
+            transforms=None,
+        )
+        train_dataset = MosaicWrapper(
+            raw_train_dataset,
+            base_transform=train_transforms,
+            img_size=img_size,
+            p=0.5,
+        )
+    else:
+        train_dataset = COCODetection(
+            img_folder=data_cfg["train_img"],
+            ann_file=data_cfg["train_ann"],
+            transforms=train_transforms,
+        )
 
     val_dataset = COCODetection(
         img_folder=data_cfg["val_img"],
@@ -561,6 +613,29 @@ def main() -> None:
         collate_fn=collate_fn,
         pin_memory=device.type == "cuda",
     )
+
+    # Optional model-selection split (keeps the reported val set untouched
+    # by best-checkpoint selection — see KDTrainer docstring).
+    select_loader = None
+    if data_cfg.get("select_ann") and data_cfg.get("select_img"):
+        logger.info("Model-selection split ENABLED "
+                    f"({data_cfg['select_ann']}) — best checkpoint will be "
+                    "chosen on this split; val is evaluated once at the end.")
+        select_dataset = COCODetection(
+            img_folder=data_cfg["select_img"],
+            ann_file=data_cfg["select_ann"],
+            transforms=val_transforms,
+            remove_no_annotations=False,
+        )
+        logger.info(f"Select set: {len(select_dataset)} images")
+        select_loader = DataLoader(
+            select_dataset,
+            batch_size=train_cfg["batch_size"],
+            shuffle=False,
+            num_workers=data_cfg.get("num_workers", 4),
+            collate_fn=collate_fn,
+            pin_memory=device.type == "cuda",
+        )
 
     # ---- Teacher mAP sanity gate ----
     # Refuses to train if the teacher is broken (random init, bad weights, etc).
@@ -606,6 +681,8 @@ def main() -> None:
         val_loader=val_loader,
         cfg=cfg,
         device=device,
+        select_loader=select_loader,
+        select_ann_file=data_cfg.get("select_ann"),
     )
 
     # Resume from a full trainer checkpoint (has epoch / optimizer / scaler).

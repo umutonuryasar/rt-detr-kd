@@ -19,6 +19,8 @@ Returned dictionary structure from forward():
         'teacher_attn':     Tensor [L, B, H, Q_t, N_t] or None,
         'student_queries':  Tensor [B, Q_s, D] or None,   # decoder queries
         'teacher_queries':  Tensor [B, Q_t, D] or None,
+        'student_scale_shapes': list[(H, W)] or None,  # per encoder scale
+        'teacher_scale_shapes': list[(H, W)] or None,
     }
 """
 
@@ -75,6 +77,7 @@ class RTDETRWithKD(nn.Module):
         student_enc = self.student.encoder_output           # [B, N_s, D]
         student_attn = self.student.get_attn_maps_tensor()  # [L, B, H, Q_s, N_s] or None
         student_queries = self.student.decoder_queries      # [B, Q_s, D] or None
+        student_shapes = getattr(self.student, "encoder_scale_shapes", None)
 
         # ---- Teacher forward (eval mode, no gradients) ----
         with torch.no_grad():
@@ -82,6 +85,7 @@ class RTDETRWithKD(nn.Module):
             teacher_enc = self.teacher.encoder_output           # [B, N_t, D]
             teacher_attn = self.teacher.get_attn_maps_tensor()  # [L, B, H, Q_t, N_t] or None
             teacher_queries = self.teacher.decoder_queries      # [B, Q_t, D] or None
+            teacher_shapes = getattr(self.teacher, "encoder_scale_shapes", None)
 
             # Detach to be safe (no_grad already prevents grad flow, but
             # explicit detach ensures nothing leaks through clone/cat ops)
@@ -99,6 +103,8 @@ class RTDETRWithKD(nn.Module):
             "teacher_attn": teacher_attn,
             "student_queries": student_queries,
             "teacher_queries": teacher_queries,
+            "student_scale_shapes": student_shapes,
+            "teacher_scale_shapes": teacher_shapes,
         }
 
     @property

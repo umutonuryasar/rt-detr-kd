@@ -48,6 +48,7 @@ class RTDETR(nn.Module):
         pretrained_backbone: bool = True,
         freeze_bn: bool = False,
         freeze_stages: int = 1,
+        capture_attn: bool = True,
     ):
         super().__init__()
 
@@ -76,10 +77,12 @@ class RTDETR(nn.Module):
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
+            capture_attn=capture_attn,
         )
 
         # Will be populated after every forward pass
         self.encoder_output: Optional[torch.Tensor] = None
+        self.encoder_scale_shapes: Optional[list[tuple[int, int]]] = None
         self.decoder_queries: Optional[torch.Tensor] = None
         self.attn_maps: list[torch.Tensor] = []
 
@@ -102,6 +105,7 @@ class RTDETR(nn.Module):
         # Encoder: flat token sequence
         enc_out = self.encoder(features)  # [B, N, D]
         self.encoder_output = enc_out  # store for KD
+        self.encoder_scale_shapes = getattr(self.encoder, "scale_shapes", None)
 
         # Decoder: predictions
         outputs = self.decoder(enc_out)
@@ -148,4 +152,5 @@ def build_rtdetr(cfg: dict) -> "RTDETR":
         dim_feedforward=model_cfg.get("dim_feedforward", 1024),
         dropout=model_cfg.get("dropout", 0.0),
         num_encoder_layers=model_cfg.get("num_encoder_layers", 1),
+        capture_attn=model_cfg.get("capture_attn", True),
     )

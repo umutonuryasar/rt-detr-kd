@@ -21,8 +21,8 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 - **6-run ablation:** Baseline, Logit-KD, Feature-KD, CWD (ICCV'21), and two novel methods — isolated and reproducible
 - **Feature-KD** with encoder MSE + decoder cross-attention cosine alignment, projecting student features to teacher channel width
-- **CWD** (Yang et al., ICCV'21) — channel-wise softmax KL baseline for fair literature comparison
-- **Query-KD** *(novel)* — distils RT-DETR's 100/300-dim decoder object queries directly; no shared Hungarian matcher required, robust to teacher/student query-count mismatch
+- **CWD** (Shu et al., ICCV'21) — channel-wise softmax KL baseline for fair literature comparison
+- **Query-KD** *(novel)* — distils RT-DETR's decoder object queries directly via per-image bipartite matching in prediction space (which object does each query describe?); robust to the 100 vs. 300 query-count mismatch. Legacy index-wise truncation is kept as an ablation baseline
 - **Stage-Adaptive KD** *(novel)* — cosine curriculum that shifts weight from feature distillation (structural alignment, early training) to logit distillation (semantic refinement, late training)
 - **Cross-architecture teacher adapter** (`src/models/rtdetr_teacher.py`) loading canonical [lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) weights with a mAP sanity gate at training start
 - **TensorRT INT8 export** with entropy calibration, FP32/FP16/INT8 latency sweep, and a latency-vs-accuracy table (`tools/export_trt.py`)
@@ -40,7 +40,7 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 | Baseline (no KD) | — | — | — | 17M |
 | Logit-KD (λ=1.0, T=4) | — | — | — | 17M |
 | Feature-KD (λ=1.0) | — | — | — | 17M |
-| CWD — Yang et al. ICCV'21 | — | — | — | 17M |
+| CWD — Shu et al. ICCV'21 | — | — | — | 17M |
 | **Query-KD** *(novel)* | — | — | — | 17M |
 | **Stage-Adaptive KD, cosine** *(novel)* | — | — | — | 17M |
 | Teacher RT-DETR-L (R50) | 53.1 | ref | ~114 | 32M |
@@ -121,11 +121,11 @@ Total loss for all methods: $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{det
 
 ### Logit-KD
 
-KL divergence between temperature-scaled classification logits:
+RT-DETR trains its classification head with a **per-class sigmoid** focal loss — logits are independent binary scores, not a categorical distribution. The default formulation therefore uses per-class *binary* KL between temperature-scaled sigmoid probabilities, which matches the distribution family the logits were trained under:
 
-$$\mathcal{L}_{\text{logit}} = T^2 \cdot \mathrm{KL}\!\left(\sigma\!\left(\tfrac{t}{T}\right) \,\Big\|\, \sigma\!\left(\tfrac{s}{T}\right)\right)$$
+$$\mathcal{L}_{\text{logit}} = T^2 \cdot \frac{1}{|BQC|}\sum_{b,q,c} \mathrm{KL}_{\text{bin}}\!\left(\sigma\!\left(\tfrac{t_{bqc}}{T}\right) \,\Big\|\, \sigma\!\left(\tfrac{s_{bqc}}{T}\right)\right)$$
 
-$T \in \{2, 4, 8\}$. Applied to the classification head only.
+The classic Hinton et al. (2015) categorical softmax KL is available via `logit_mode: softmax` as an ablation — note it imposes a categorical structure the logits do not have. $T \in \{2, 4, 8\}$. Applied to the classification head only.
 
 ### Feature-KD
 
@@ -137,7 +137,11 @@ $$\mathcal{L}_{\text{attn}} = 1 - \cos\!\left(s_{\text{attn}},\, t_{\text{attn}}
 
 $$\mathcal{L}_{\text{KD}} = w_f \cdot \mathcal{L}_{\text{feat}} + \alpha \cdot \mathcal{L}_{\text{attn}}$$
 
-### CWD — Channel-Wise Distillation (Yang et al., ICCV'21)
+Encoder sequences are concatenations of flattened scales (student C4+C5, teacher C3+C4+C5); alignment is **per scale in 2-D** — sequences are split back into their scale chunks, paired from the coarsest end (C5↔C5, C4↔C4), and the teacher's extra C3 scale is dropped rather than blended in.
+
+> **Note (canonical teacher):** the lyuwenyu deformable-attention teacher does not expose dense $[Q, N]$ cross-attention maps, so $\mathcal{L}_{\text{attn}}$ is **inactive** in the cross-architecture setup — Feature-KD reduces to the encoder term. The attention term is only active with the same-architecture (own) teacher; paper tables state which configuration each run used.
+
+### CWD — Channel-Wise Distillation (Shu et al., ICCV'21)
 
 Spatially-normalized channel distributions aligned via KL divergence:
 
@@ -145,11 +149,15 @@ $$\mathcal{L}_{\text{CWD}} = \sum_{c=1}^{C} \mathrm{KL}\!\left(\tilde{t}_c \,\Bi
 
 ### Query-KD *(novel)*
 
-Distils RT-DETR's decoder object queries — a transformer-specific signal unavailable to CNN-detector KD methods. No shared Hungarian matcher is required; alignment is over the first $\min(Q_s, Q_t)$ queries, which is robust to the 100 vs. 300 query-count mismatch between student and teacher.
+Distils RT-DETR's decoder object queries — a transformer-specific signal unavailable to CNN-detector KD methods. Decoder queries carry no canonical ordering (which query represents which object is image-dependent), so correspondence is built per image via **bipartite matching in prediction space**: the cost combines the L1 distance between sigmoid class-probability vectors and the L1 distance between predicted boxes, then Hungarian assignment pairs each student query with the teacher query describing the most similar object. This is robust to the 100 vs. 300 query-count mismatch and, unlike a shared student–teacher–GT Hungarian assignment, requires no joint matcher.
 
-$$\mathcal{L}_{\text{query}} = \mathrm{MSE}(q_s, q_t) + \alpha \cdot \left(1 - \cos\!\left(A_s^{\text{dec}},\, A_t^{\text{dec}}\right)\right)$$
+$$\mathcal{L}_{\text{query}} = \mathrm{MSE}\big(q_s^{(i)}, q_t^{(\pi(i))}\big) + \alpha \cdot \left(1 - \cos\!\left(A_s^{\text{dec}},\, A_t^{\text{dec}}\right)\right)$$
 
-**Distinction from prior work.** DETRDistill (ICLR'23) aligns *matched* query-prediction pairs after joint Hungarian assignment, which breaks when teacher and student query counts differ. MimicDet (ECCV'20) mimics RPN attention in two-stage detectors; the decoder cross-attention term here is specific to RT-DETR's encoder-memory interaction, which has no CNN analogue.
+where $\pi$ is the per-image assignment. Index-wise truncation (`query_matching: index`) is retained strictly as an ablation baseline to quantify the value of matching.
+
+**Distinction from prior work.** DETRDistill (ICLR'23) aligns query-prediction pairs after a *joint* Hungarian assignment against ground truth, which breaks when teacher and student query counts differ; the matching here is student↔teacher directly and needs no labels. MimicDet (ECCV'20) mimics RPN attention in two-stage detectors; the decoder cross-attention term here is specific to RT-DETR's encoder-memory interaction, which has no CNN analogue.
+
+> **Note (canonical teacher):** the lyuwenyu teacher adapter currently does not expose post-norm decoder query embeddings (deformable decoder), so Query-KD requires the same-architecture (own) teacher; against the canonical teacher it degrades to a logged no-op.
 
 ### Stage-Adaptive KD *(novel)*
 

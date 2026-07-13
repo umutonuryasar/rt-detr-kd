@@ -251,6 +251,12 @@ class HybridEncoder(nn.Module):
         # Flatten C4 + C5 only as decoder memory (C3 is used for fusion only).
         # C4: H/16 * W/16 = 1600 tokens at 640x640
         # C5: H/32 * W/32 = 400 tokens at 640x640  → total 2000, manageable on 4 GB.
+        # Store per-scale spatial shapes so KD losses can split the
+        # concatenated sequence and align per scale (fine → coarse order).
+        self.scale_shapes = [
+            tuple(c4_fused.shape[-2:]),
+            tuple(c5_enc.shape[-2:]),
+        ]
         tokens = self._flatten_and_embed([c4_fused, c5_enc])
         return tokens  # [B, N_total, D]
 

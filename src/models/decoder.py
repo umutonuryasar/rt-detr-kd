@@ -83,10 +83,16 @@ class RTDETRDecoderLayer(nn.Module):
         nhead: int,
         dim_feedforward: int = 1024,
         dropout: float = 0.0,
+        capture_attn: bool = True,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.nhead = nhead
+        # When False, need_weights=False lets PyTorch take its fused
+        # scaled-dot-product fast path and skips storing [B, H, Q, N] maps —
+        # significant VRAM/speed savings for KD methods that never read them
+        # (baseline, logit, cwd, mgd).
+        self.capture_attn = capture_attn
 
         # Self-attention
         self.self_attn = nn.MultiheadAttention(
@@ -155,13 +161,13 @@ class RTDETRDecoderLayer(nn.Module):
             memory,
             memory,
             key_padding_mask=memory_key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,  # keep per-head weights
+            need_weights=self.capture_attn,
+            average_attn_weights=False,  # keep per-head weights (when captured)
         )
-        # attn_w shape: [B, nhead, num_queries, N_mem]
-        # Keep the computation graph intact so attention-KD losses (runs 10/11/16)
-        # can backprop through QK projections.
-        self.cross_attn_weights = attn_w
+        # attn_w shape: [B, nhead, num_queries, N_mem] (or None when
+        # capture_attn=False). Keep the computation graph intact so
+        # attention-KD losses can backprop through QK projections.
+        self.cross_attn_weights = attn_w if self.capture_attn else None
         queries = residual + self.drop2(ca_out)
 
         # 3. Feed-forward (pre-norm)
@@ -191,6 +197,9 @@ class RTDETRDecoder(nn.Module):
         nhead: Number of attention heads.
         dim_feedforward: Feed-forward hidden size.
         dropout: Dropout rate.
+        capture_attn: Store per-layer cross-attention maps for KD. Disable
+                      for KD methods that do not consume attention to save
+                      VRAM and enable the fused attention fast path.
     """
 
     def __init__(
@@ -202,6 +211,7 @@ class RTDETRDecoder(nn.Module):
         nhead: int = 8,
         dim_feedforward: int = 1024,
         dropout: float = 0.0,
+        capture_attn: bool = True,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -213,9 +223,11 @@ class RTDETRDecoder(nn.Module):
         self.query_embed = LearnedQueryEmbed(num_queries, hidden_dim)
 
         # Decoder layers
+        self.capture_attn = capture_attn
         self.layers = nn.ModuleList(
             [
-                RTDETRDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout)
+                RTDETRDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout,
+                                   capture_attn=capture_attn)
                 for _ in range(num_decoder_layers)
             ]
         )

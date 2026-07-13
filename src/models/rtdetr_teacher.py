@@ -190,6 +190,7 @@ class RTDETRTeacher(nn.Module):
 
         # KD-interface attributes
         self.encoder_output: Optional[torch.Tensor] = None
+        self.encoder_scale_shapes: Optional[list] = None
         self.decoder_queries: Optional[torch.Tensor] = None
         self.attn_maps: list = []
 
@@ -217,6 +218,7 @@ class RTDETRTeacher(nn.Module):
         # Hook on the encoder output
         def enc_hook(module, inputs, output):
             self.encoder_output = self._flatten_encoder_output(output)
+            self.encoder_scale_shapes = self._extract_scale_shapes(output)
         self.inner.encoder.register_forward_hook(enc_hook)
 
         # Hook on the decoder output. The decoder returns a dict during eval
@@ -230,6 +232,21 @@ class RTDETRTeacher(nn.Module):
         # query-KD against this teacher will fall back to logit alignment.
         # (Adding a deeper hook on their decoder layer LayerNorm would let
         # us recover the embedding; deferred to Phase 2D if Query-KD wins.)
+
+    @staticmethod
+    def _extract_scale_shapes(outs):
+        """Per-scale (H, W) list matching _flatten_encoder_output's order.
+
+        Enables per-scale 2-D alignment in the KD losses instead of the
+        cross-scale-blending 1-D interpolation over the concatenated axis.
+        Returns None when the output is already a flat sequence (shape
+        information lost).
+        """
+        if isinstance(outs, torch.Tensor):
+            if outs.dim() == 4:
+                return [tuple(outs.shape[-2:])]
+            return None  # already flat [B, N, D] — shapes unavailable
+        return [tuple(feat.shape[-2:]) for feat in outs]
 
     @staticmethod
     def _flatten_encoder_output(outs) -> torch.Tensor:
@@ -262,6 +279,7 @@ class RTDETRTeacher(nn.Module):
     def forward(self, images: torch.Tensor) -> dict:
         # Reset KD-side storage so consumers always see this-pass features.
         self.encoder_output = None
+        self.encoder_scale_shapes = None
         self.decoder_queries = None
         self.attn_maps = []
 

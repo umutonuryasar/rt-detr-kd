@@ -194,12 +194,22 @@ class MosaicWrapper:
     This wraps a base dataset and applies mosaic with probability `p`.
     When mosaic is not applied, the standard transform pipeline is used.
 
+    IMPORTANT — normalization contract:
+        ``dataset`` must return RAW PIL images (i.e., be constructed with
+        ``transforms=None``). ``base_transform`` is the full pipeline
+        (Resize → ... → ToTensor → Normalize) and is applied exactly ONCE:
+        on the single image in the standard path, or on the assembled
+        mosaic canvas in the mosaic path. Wrapping an already-transformed
+        dataset would normalize twice and corrupt the mosaic images (the
+        previous behavior — fixed).
+
     Note: Because mosaic requires access to 3 additional random images, it
     must be applied at the dataset level rather than as a simple transform.
 
     Args:
-        dataset: A COCODetection dataset (or any __getitem__-compatible dataset).
-        base_transform: Transform applied to individual images before mosaic.
+        dataset: A COCODetection dataset returning raw PIL images
+                 (constructed with transforms=None).
+        base_transform: Full transform pipeline applied once per sample.
         img_size: Output mosaic size (the 2×2 grid fills img_size × img_size).
         p: Probability of applying mosaic for any given sample.
     """
@@ -215,17 +225,29 @@ class MosaicWrapper:
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, dict]:
         if random.random() > self.p:
-            # Standard path
+            # Standard path: raw PIL → full pipeline once.
             img, target = self.dataset[index]
+            if isinstance(img, torch.Tensor):
+                raise TypeError(
+                    "MosaicWrapper received a tensor from the wrapped dataset. "
+                    "Construct the dataset with transforms=None and pass the "
+                    "pipeline via base_transform to avoid double normalization."
+                )
             if self.base_transform is not None:
                 img, target = self.base_transform(img, target)
             return img, target
 
-        # Mosaic path: pick 4 images
+        # Mosaic path: pick 4 raw images
         indices = [index] + random.sample(range(len(self.dataset)), 3)
         imgs, targets = [], []
         for i in indices:
             im, tgt = self.dataset[i]
+            if isinstance(im, torch.Tensor):
+                raise TypeError(
+                    "MosaicWrapper received a tensor from the wrapped dataset. "
+                    "Construct the dataset with transforms=None and pass the "
+                    "pipeline via base_transform to avoid double normalization."
+                )
             imgs.append(im)
             targets.append(tgt)
 
@@ -255,11 +277,9 @@ class MosaicWrapper:
         for k, (img, target) in enumerate(zip(imgs, targets)):
             x0, y0, x1, y1 = positions[k]
             w_cell, h_cell = x1 - x0, y1 - y0
-            # Resize image to cell size
-            img_resized = img.resize((w_cell, h_cell)) if isinstance(img, Image.Image) \
-                else Image.fromarray(
-                    (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                ).resize((w_cell, h_cell))
+            # Resize raw PIL image to cell size. (Tensor inputs are rejected
+            # in __getitem__ — see the normalization contract above.)
+            img_resized = img.resize((w_cell, h_cell))
             canvas.paste(img_resized, (x0, y0))
 
             boxes = target["boxes"]  # [M, 4] cxcywh normalized
@@ -298,17 +318,23 @@ class MosaicWrapper:
             final_boxes = torch.zeros((0, 4), dtype=torch.float32)
             final_labels = torch.zeros((0,), dtype=torch.long)
 
-        # Convert canvas to tensor and normalize
-        img_tensor = TF.to_tensor(canvas)
-        img_tensor = TF.normalize(img_tensor, _IMAGENET_MEAN, _IMAGENET_STD)
-
         mosaic_target = {
             "boxes": final_boxes,
             "labels": final_labels,
             "image_id": targets[0].get("image_id", -1),
             "orig_size": (s, s),
         }
-        return img_tensor, mosaic_target
+
+        # Apply the FULL pipeline exactly once on the assembled canvas
+        # (Resize is a no-op at img_size; flip/jitter augment the mosaic;
+        # ToTensor + Normalize run a single time).
+        if self.base_transform is not None:
+            img_out, mosaic_target = self.base_transform(canvas, mosaic_target)
+        else:
+            img_out = TF.to_tensor(canvas)
+            img_out = TF.normalize(img_out, _IMAGENET_MEAN, _IMAGENET_STD)
+
+        return img_out, mosaic_target
 
 
 # ---------------------------------------------------------------------------
