@@ -1,13 +1,13 @@
 # RT-DETR Knowledge Distillation
 
-**Systematic knowledge distillation study for real-time detection transformers — 5 KD methods compared, 2 novel contributions, TensorRT INT8 edge deployment on a 4 GB GPU.**
+**Systematic knowledge distillation study for real-time detection transformers — a 9-run controlled ablation across 5 KD methods with 2 novel contributions, TensorRT INT8 edge deployment on a 4 GB GPU.**
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![CI](https://github.com/umutonuryasar/rt-detr-kd/actions/workflows/ci.yml/badge.svg)
 
-> **Status:** Phase 2A ablation in progress — arXiv preprint forthcoming.
+> **Status:** Phase 2A ablation in progress. Tech-report scope: results land in this README together with a 3-part blog series — findings are reported here, honestly, whichever way they go.
 
 ---
 
@@ -19,33 +19,37 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 ## What I Built
 
-- **6-run ablation:** Baseline, Logit-KD, Feature-KD, CWD (ICCV'21), and two novel methods — isolated and reproducible
-- **Feature-KD** with encoder MSE + decoder cross-attention cosine alignment, projecting student features to teacher channel width
+- **9-run ablation:** baseline, Logit-KD (binary vs. softmax formulation), Feature-KD, CWD (ICCV'21), Query-KD (Hungarian vs. index matching), and Stage-Adaptive KD (cosine vs. inverse-cosine curriculum-direction control) — every claim ships with its own control run
+- **Leakage-free model selection** — best checkpoints are chosen on a 2.5K selection split carved *from the training pool* (`tools/make_select_split.py`); the reported val set is evaluated once per run and never drives checkpoint selection
+- **Feature-KD** with encoder MSE + decoder cross-attention cosine alignment, projecting student features to teacher channel width; multi-scale sequences are aligned **per scale in 2-D**, never blended across scale boundaries
 - **CWD** (Shu et al., ICCV'21) — channel-wise softmax KL baseline for fair literature comparison
 - **Query-KD** *(novel)* — distils RT-DETR's decoder object queries directly via per-image bipartite matching in prediction space (which object does each query describe?); robust to the 100 vs. 300 query-count mismatch. Legacy index-wise truncation is kept as an ablation baseline
-- **Stage-Adaptive KD** *(novel)* — cosine curriculum that shifts weight from feature distillation (structural alignment, early training) to logit distillation (semantic refinement, late training)
+- **Stage-Adaptive KD** *(novel)* — cosine curriculum that shifts weight from feature distillation (structural alignment, early training) to logit distillation (semantic refinement, late training), trained against an inverse-schedule control
 - **Cross-architecture teacher adapter** (`src/models/rtdetr_teacher.py`) loading canonical [lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) weights with a mAP sanity gate at training start
 - **TensorRT INT8 export** with entropy calibration, FP32/FP16/INT8 latency sweep, and a latency-vs-accuracy table (`tools/export_trt.py`)
 - **FastAPI inference server** for single-image and batch detection endpoints
-- **Automated results aggregation** (`tools/aggregate_results.py`) producing CSV + Markdown tables and mean ± std across seeds
+- **Automated results aggregation** (`tools/aggregate_results.py`) producing CSV + Markdown tables
 
 ---
 
 ## Results
 
-> Ablation training in progress. Table will be populated after Phase 2A (COCO 30K, 36 epochs).
+> Ablation training in progress. Table will be populated after Phase 2A.
 
-| Method | mAP@\[.5:.95\] | ΔmAP | FPS (RTX 3050) | Params |
-|--------|---------------|------|----------------|--------|
-| Baseline (no KD) | — | — | — | 17M |
-| Logit-KD (λ=1.0, T=4) | — | — | — | 17M |
-| Feature-KD (λ=1.0) | — | — | — | 17M |
-| CWD — Shu et al. ICCV'21 | — | — | — | 17M |
-| **Query-KD** *(novel)* | — | — | — | 17M |
-| **Stage-Adaptive KD, cosine** *(novel)* | — | — | — | 17M |
-| Teacher RT-DETR-L (R50) | 53.1 | ref | ~114 | 32M |
+| # | Method | mAP@\[.5:.95\] | ΔmAP | FPS (RTX 3050) | Params |
+|---|--------|---------------|------|----------------|--------|
+| 0 | Baseline (no KD) | — | — | — | 17M |
+| 1 | Logit-KD, binary KL (λ=1.0, T=4) | — | — | — | 17M |
+| 2 | Logit-KD, softmax KL *(formulation ablation)* | — | — | — | 17M |
+| 3 | Feature-KD (enc + attn) | — | — | — | 17M |
+| 4 | CWD — Shu et al. ICCV'21 | — | — | — | 17M |
+| 5 | **Query-KD, Hungarian** *(novel)* | — | — | — | 17M |
+| 6 | Query-KD, index *(matching ablation)* | — | — | — | 17M |
+| 7 | **Stage-Adaptive, cosine** *(novel)* | — | — | — | 17M |
+| 8 | Stage-Adaptive, inverse-cosine *(direction control)* | — | — | — | 17M |
+| — | Teacher (own R50, trained in this repo) | TBD | ref | — | 32M |
 
-Final paper numbers (full COCO 118K, 72 epochs, 3 seeds) will be reported as mean ± std.
+**Protocol:** COCO 30K subset (27.5K train / 2.5K selection split), 36 epochs, 512 px, fixed seed 42, identical teacher weights across all runs. Checkpoint selection uses the selection split; val2017 is touched once per run. Single seed — differences are reported as-is, without statistical-significance claims.
 
 ---
 
@@ -53,17 +57,18 @@ Final paper numbers (full COCO 118K, 72 epochs, 3 seeds) will be reported as mea
 
 ### Student vs. teacher
 
-The repository pairs a **canonical teacher** (loaded from the official lyuwenyu/RT-DETR PyTorch release) with a **simplified custom student** trained from scratch. KD operates cross-architecture. The teacher mAPs below are from the upstream repository; all paper tables report student mAP.
+The main ablation pairs the simplified student with an **own-architecture R50 teacher** trained in this repo: Query-KD and the cross-attention alignment terms require signals (post-norm decoder queries, dense $[Q, N]$ attention maps) that the canonical deformable-attention teacher does not expose. The **canonical lyuwenyu teacher adapter** is retained for an optional cross-architecture comparison covering the methods that survive without those signals (Logit-KD, CWD, encoder-only Feature-KD); upstream teacher mAPs below are from the official release.
 
 | Role | Backbone | Source | Params | mAP@\[.5:.95\] |
 |------|----------|--------|--------|---------------|
 | Student (simplified, this repo) | ResNet-18 | trained here | 17M | TBD |
-| Teacher RT-DETR-M | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3 |
-| Teacher RT-DETR-L | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1 |
+| Teacher (own, main ablation) | ResNet-50 | trained here | 32M | TBD |
+| Teacher RT-DETR-M (cross-arch option) | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3 |
+| Teacher RT-DETR-L (cross-arch option) | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1 |
 
 ### Implementation differences (student only)
 
-Every simplification is forced by the 4 GB RTX 3050 VRAM budget for dual-model (teacher + student) forward passes. The teacher is the unmodified canonical architecture.
+Every simplification is forced by the 4 GB RTX 3050 VRAM budget for dual-model (teacher + student) forward passes.
 
 | Component | Canonical RT-DETR | This student | Reason |
 |-----------|-------------------|--------------|--------|
@@ -72,7 +77,7 @@ Every simplification is forced by the 4 GB RTX 3050 VRAM budget for dual-model (
 | Cross-attention | Multi-scale deformable | Vanilla MHA | Deformable kernel doubles backward memory |
 | Encoder memory | C3 + C4 + C5 | C4 + C5 only | C3 token count (6400 @ 640²) saturates VRAM |
 
-Phase 2D (final runs) executes on a Colab A100 but deliberately keeps the same student architecture for consistency across ablation and final phases. The paper measures *relative KD-method ranking*, which transfers independently of these simplifications.
+Ablation runs execute on a Colab A100; the RTX 3050 hosts smoke tests and the TensorRT/FPS benchmarks. The student architecture is identical everywhere. The study measures *relative KD-method ranking* under a fixed budget, which is the claim these simplifications support.
 
 ---
 
@@ -105,9 +110,10 @@ rt-detr-kd/
 ├── configs/          # YAML configs: student, teacher, all 5 KD methods
 │   └── kd/           # Active KD configs (cwd, query, stage_adaptive)
 ├── src/              # Core library: models, distillation losses, data, trainer
-├── tools/            # train_kd, eval, benchmark_fps, export_trt, serve, aggregate_results
-├── tests/            # pytest smoke tests — runs on every push (CPU-only CI)
-├── scripts/          # run_ablation.sh (6-run Phase 2A), run_final.sh (Phase 2D)
+├── tools/            # train_kd, eval, benchmark_fps, export_trt, serve,
+│                     # aggregate_results, make_select_split
+├── tests/            # pytest suite incl. methodology regression tests — runs on every push
+├── scripts/          # run_ablation.sh (9-run Phase 2A); run_final.sh (full-COCO — out of current scope)
 ├── notebooks/        # ablation_analysis, visualize_attention, colab_training
 ├── third_party/      # lyuwenyu/RT-DETR submodule — canonical teacher weights + config
 └── .github/          # CI: pytest on push
@@ -139,7 +145,7 @@ $$\mathcal{L}_{\text{KD}} = w_f \cdot \mathcal{L}_{\text{feat}} + \alpha \cdot \
 
 Encoder sequences are concatenations of flattened scales (student C4+C5, teacher C3+C4+C5); alignment is **per scale in 2-D** — sequences are split back into their scale chunks, paired from the coarsest end (C5↔C5, C4↔C4), and the teacher's extra C3 scale is dropped rather than blended in.
 
-> **Note (canonical teacher):** the lyuwenyu deformable-attention teacher does not expose dense $[Q, N]$ cross-attention maps, so $\mathcal{L}_{\text{attn}}$ is **inactive** in the cross-architecture setup — Feature-KD reduces to the encoder term. The attention term is only active with the same-architecture (own) teacher; paper tables state which configuration each run used.
+> **Note (canonical teacher):** the lyuwenyu deformable-attention teacher does not expose dense $[Q, N]$ cross-attention maps, so $\mathcal{L}_{\text{attn}}$ is **inactive** in the cross-architecture setup — Feature-KD reduces to the encoder term there. The main ablation uses the own-architecture teacher, where both terms are active; results tables state which configuration each run used.
 
 ### CWD — Channel-Wise Distillation (Shu et al., ICCV'21)
 
@@ -157,7 +163,7 @@ where $\pi$ is the per-image assignment. Index-wise truncation (`query_matching:
 
 **Distinction from prior work.** DETRDistill (ICLR'23) aligns query-prediction pairs after a *joint* Hungarian assignment against ground truth, which breaks when teacher and student query counts differ; the matching here is student↔teacher directly and needs no labels. MimicDet (ECCV'20) mimics RPN attention in two-stage detectors; the decoder cross-attention term here is specific to RT-DETR's encoder-memory interaction, which has no CNN analogue.
 
-> **Note (canonical teacher):** the lyuwenyu teacher adapter currently does not expose post-norm decoder query embeddings (deformable decoder), so Query-KD requires the same-architecture (own) teacher; against the canonical teacher it degrades to a logged no-op.
+> **Note (canonical teacher):** the lyuwenyu teacher adapter does not expose post-norm decoder query embeddings (deformable decoder), so Query-KD requires the same-architecture (own) teacher; against the canonical teacher it degrades to a logged no-op.
 
 ### Stage-Adaptive KD *(novel)*
 
@@ -167,7 +173,7 @@ $$w_f(e) = \cos\!\left(\frac{\pi e}{2E}\right), \qquad w_l(e) = 1 - w_f(e)$$
 
 $$\mathcal{L}_{\text{KD}}^{\text{SA}}(e) = w_f(e)\cdot\mathcal{L}_{\text{feat}} + w_l(e)\cdot\mathcal{L}_{\text{logit}}$$
 
-where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosine / linear / step / sigmoid / inverse-cosine) is configurable.
+where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosine / linear / step / sigmoid / inverse-cosine) is configurable. The ablation trains the **inverse-cosine schedule as a curriculum-direction control**: if reversing the curriculum performs on par with the proposed direction, the scheduling claim is rejected rather than defended.
 
 ---
 
@@ -175,25 +181,31 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 
 **Done**
 - [x] Full distillation pipeline — 5 KD methods, unified loss wrapper, config-driven
+- [x] Methodology fix batch — prediction-space Hungarian query matching, sigmoid-matched binary logit KL, per-scale 2-D feature alignment, mosaic single-normalization, leakage-free checkpoint selection (see `FIXES.md`)
 - [x] Cross-architecture teacher adapter with mAP sanity gate
 - [x] TensorRT FP32 / FP16 / INT8 export with entropy calibration (`tools/export_trt.py`)
 - [x] FastAPI inference server with single-image and batch endpoints
 - [x] DETR-style top-k decoding (fixes ~2 mAP vs. per-query argmax)
-- [x] Automated results aggregation — CSV + Markdown + mean ± std (`tools/aggregate_results.py`)
-- [x] CI test suite: pytest smoke tests on every push (CPU-only)
+- [x] Automated results aggregation — CSV + Markdown (`tools/aggregate_results.py`)
+- [x] CI test suite: pytest incl. methodology regression tests on every push (CPU-only)
 
 **In progress**
-- [ ] Phase 2A ablation runs — 6 configs on COCO 30K subset, 36 epochs
+- [ ] Own R50 teacher training (single run; reused across all ablation runs)
+- [ ] Phase 2A ablation — 9 runs on COCO 30K subset, 36 epochs, seed 42
 - [ ] Attention visualization notebook (teacher vs. student cross-attention maps)
 
 **Next**
-- [ ] Phase 2D — top configurations on full COCO 118K, 72 epochs
-- [ ] Phase 2E — best method × 3 seeds, mean ± std
-- [ ] arXiv preprint (cs.CV)
+- [ ] Results, Findings, and Limitations sections in this README
+- [ ] TensorRT FP16/INT8 latency-vs-accuracy sweep on the best checkpoint
+- [ ] Hugging Face Spaces demo with the best checkpoint
+- [ ] 3-part blog series on the methodology findings
+
+**Deliberately out of scope**
+- Full-COCO 118K multi-seed runs and a standalone paper — the single-seed, subset-scale tech-report format keeps the claims proportionate to the compute behind them.
 
 ---
 
 ## Author
 
-**Umut Onur Yasar** — Applied AI Research Engineer  
+**Umut Onur Yasar** — Applied AI Research Engineer
 [GitHub](https://github.com/umutonuryasar) · [LinkedIn](https://linkedin.com/in/umutonuryasar)
