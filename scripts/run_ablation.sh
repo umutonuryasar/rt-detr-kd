@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
-# Run 6 focused ablation configurations for the RT-DETR KD project (Phase 2A).
+# Run the Phase 2A ablation for the RT-DETR KD project (tech-report scope).
 #
-# Ablation grid (production-oriented showcase):
-#   Run 0  : Baseline (no KD)
-#   Run 5  : Logit-KD  (λ=1.0, T=4)
-#   Run 8  : Feature-KD (λ=1.0)
-#   Run 14 : CWD (Channel-Wise Distillation, ICCV'21 baseline)
-#   Run 16 : Query-KD (novel: decoder object query distillation)
-#   Run 17 : Stage-Adaptive KD, cosine schedule (novel: curriculum weighting)
+# Ablation grid — 9 runs + 1 optional:
+#   Run 0 : Baseline (no KD)
+#   Run 1 : Logit-KD, binary KL          (sigmoid-matched — default formulation)
+#   Run 2 : Logit-KD, softmax KL         (formulation ablation)
+#   Run 3 : Feature-KD (enc MSE + attn)  (attn term requires TEACHER_SOURCE=own)
+#   Run 4 : CWD (Shu et al., ICCV'21 literature baseline)
+#   Run 5 : Query-KD, hungarian matching (novel #1 — requires TEACHER_SOURCE=own)
+#   Run 6 : Query-KD, index matching     (matching-contribution ablation)
+#   Run 7 : Stage-Adaptive, cosine       (novel #2 — curriculum weighting)
+#   Run 8 : Stage-Adaptive, inverse_cosine (curriculum-DIRECTION control:
+#           if ≈ cosine, the curriculum claim does not hold — report honestly)
+#   Run 9 : MGD (optional extra literature baseline — commented out below)
+#
+# Model selection: per-epoch eval + best checkpoint use a selection split
+# carved FROM the training pool (tools/make_select_split.py); the val set is
+# evaluated once at the end and stays untouched by checkpoint selection.
 #
 # Usage:
+#   # one-time, before the first run (fixed seed — same split for ALL runs):
+#   python tools/make_select_split.py \
+#       --ann $COCO_ROOT/annotations/instances_train2017_30k.json \
+#       --num-select 2500 --seed 42
 #   bash scripts/run_ablation.sh [COCO_ROOT] [OUTPUT_ROOT]
 #
 # Prerequisites:
 #   - COCO data downloaded (see scripts/download_coco_subset.sh)
-#   - Teacher weights available at $TEACHER_WEIGHTS
+#   - Selection split generated (command above)
+#   - OWN teacher weights at $TEACHER_WEIGHTS (Query-KD and the Feature-KD
+#     attention term are inactive against the lyuwenyu teacher)
 
 set -euo pipefail
 
@@ -40,13 +55,26 @@ TEACHER_MIN_MAP="${TEACHER_MIN_MAP:-0.0}"    # 0.0 disables the gate
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"     # power-user escape hatch
 
 EPOCHS=36
-BATCH_SIZE=4
-IMG_SIZE=512   # 640 OOMs on RTX 3050 with teacher+student; 512 fits in 4GB fp16
+BATCH_SIZE="${BATCH_SIZE:-4}"    # 4 on RTX 3050 (4GB); 16 on Colab A100
+IMG_SIZE="${IMG_SIZE:-512}"      # 640 OOMs on RTX 3050 with teacher+student
+SEED=42                          # single fixed seed for the whole ablation
 
-TRAIN_ANN="$COCO_ROOT/annotations/instances_train2017_30k.json"
+# Leakage-free splits (produced by tools/make_select_split.py, seed 42):
+#   *_train.json  = 30K subset MINUS the 2.5K selection images
+#   *_select.json = the 2.5K selection split (checkpoint selection only)
+TRAIN_ANN="$COCO_ROOT/annotations/instances_train2017_30k_train.json"
+SELECT_ANN="$COCO_ROOT/annotations/instances_train2017_30k_select.json"
 VAL_ANN="$COCO_ROOT/annotations/instances_val2017.json"
 TRAIN_IMG="$COCO_ROOT/train2017_30k"
+SELECT_IMG="$TRAIN_IMG"          # selection images live in the same folder
 VAL_IMG="$COCO_ROOT/val2017"
+
+if [ ! -f "$SELECT_ANN" ]; then
+    echo "ERROR: $SELECT_ANN not found." >&2
+    echo "Generate the selection split first (fixed seed 42):" >&2
+    echo "  python tools/make_select_split.py --ann $COCO_ROOT/annotations/instances_train2017_30k.json --num-select 2500 --seed 42" >&2
+    exit 1
+fi
 
 # ---- Helpers ----
 run_experiment() {
@@ -56,8 +84,9 @@ run_experiment() {
     local temperature="$4"
     local tag="$5"
     local kd_cfg="${6:-}"         # optional: path to kd config yaml
-    local teacher_cfg="${7:-$TEACHER_CFG}"   # optional: override teacher config
-    local teacher_weights="${8:-$TEACHER_WEIGHTS}"  # optional: override teacher weights
+    local run_extra_args="${7:-}" # optional: per-run flags (e.g. --logit-mode softmax)
+    local teacher_cfg="${8:-$TEACHER_CFG}"   # optional: override teacher config
+    local teacher_weights="${9:-$TEACHER_WEIGHTS}"  # optional: override teacher weights
     local output_dir="$OUTPUT_ROOT/$tag"
 
     echo ""
@@ -129,11 +158,15 @@ run_experiment() {
         --coco-val "$VAL_IMG" \
         --train-ann "$TRAIN_ANN" \
         --val-ann "$VAL_ANN" \
+        --select-img "$SELECT_IMG" \
+        --select-ann "$SELECT_ANN" \
+        --seed "$SEED" \
         --use-amp \
         $teacher_flag \
         $kd_cfg_flag \
         $lyuwenyu_flag \
         $map_gate_flag \
+        $run_extra_args \
         $EXTRA_TRAIN_ARGS \
         2>&1 | tee "$output_dir/train.log"
 
@@ -172,23 +205,40 @@ echo ""
 # ---- Run 0: Baseline (no KD) ----
 run_experiment 0 "none" "0.0" "4" "run00_baseline"
 
-# ---- Run 5: Logit-KD (λ=1.0, T=4) ----
-run_experiment 5 "logit" "1.0" "4" "run05_logit_l1.0_t4"
+# ---- Run 1: Logit-KD, binary KL (sigmoid-matched default) ----
+run_experiment 1 "logit" "1.0" "4" "run01_logit_binary_t4" \
+    "" "--logit-mode binary"
 
-# ---- Run 8: Feature-KD (λ=1.0) ----
-run_experiment 8 "feature" "1.0" "4" "run08_feature_l1.0"
+# ---- Run 2: Logit-KD, softmax KL (formulation ablation) ----
+run_experiment 2 "logit" "1.0" "4" "run02_logit_softmax_t4" \
+    "" "--logit-mode softmax"
 
-# ---- Run 14: CWD (Channel-Wise Distillation, ICCV'21 baseline) ----
-run_experiment 14 "cwd" "1.0" "4" "run14_cwd_l1.0" \
+# ---- Run 3: Feature-KD (enc MSE + attention; attn needs own teacher) ----
+run_experiment 3 "feature" "1.0" "4" "run03_feature_l1.0"
+
+# ---- Run 4: CWD (Shu et al., ICCV'21 literature baseline) ----
+run_experiment 4 "cwd" "1.0" "4" "run04_cwd_l1.0" \
     "configs/kd/cwd_kd.yml"
 
-# ---- Run 16: Query-KD (novel: decoder object query distillation) ----
-run_experiment 16 "query" "1.0" "4" "run16_query_kd_l1.0" \
-    "configs/kd/query_kd.yml"
+# ---- Run 5: Query-KD, hungarian matching (novel #1) ----
+run_experiment 5 "query" "1.0" "4" "run05_query_hungarian" \
+    "configs/kd/query_kd.yml" "--query-matching hungarian"
 
-# ---- Run 17: Stage-Adaptive KD, cosine (novel: curriculum weighting) ----
-run_experiment 17 "stage_adaptive" "1.0" "4" "run17_stage_adaptive_cosine" \
-    "configs/kd/stage_adaptive_kd.yml"
+# ---- Run 6: Query-KD, index matching (matching-contribution ablation) ----
+run_experiment 6 "query" "1.0" "4" "run06_query_index" \
+    "configs/kd/query_kd.yml" "--query-matching index"
+
+# ---- Run 7: Stage-Adaptive, cosine (novel #2) ----
+run_experiment 7 "stage_adaptive" "1.0" "4" "run07_stage_adaptive_cosine" \
+    "configs/kd/stage_adaptive_kd.yml" "--schedule cosine"
+
+# ---- Run 8: Stage-Adaptive, inverse_cosine (curriculum-direction control) ----
+run_experiment 8 "stage_adaptive" "1.0" "4" "run08_stage_adaptive_invcos" \
+    "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
+
+# ---- Run 9 (OPTIONAL): MGD extra literature baseline ----
+# run_experiment 9 "mgd" "1.0" "4" "run09_mgd" \
+#     "configs/kd/archive/mgd_kd.yml"
 
 # ---- Summary ----
 ABLATION_END=$(date +%s)

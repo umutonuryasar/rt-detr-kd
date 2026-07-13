@@ -1,6 +1,8 @@
 kd_type: query
 kd_lambda: 1.0
-alpha: 0.5              # weight for decoder cross-attention alignment term
-query_matching: hungarian  # 'hungarian' (prediction-space bipartite matching,
-                           # default) or 'index' (legacy first-K truncation —
-                           # keep only as the ablation baseline)
+alpha: 0.5    # weight for decoder cross-attention alignment term
+
+# query_matching is intentionally NOT set here: the YAML would override the
+# CLI flag (YAML merge runs after arg parsing), which breaks the
+# hungarian-vs-index ablation in run_ablation.sh. Control it via
+# --query-matching {hungarian|index}; the code default is 'hungarian'.
