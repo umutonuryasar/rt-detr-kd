@@ -283,6 +283,11 @@ class KDTrainer:
                 self.save_checkpoint(epoch, tag="best")
                 logger.info(f"  New best (selection) mAP: {self.best_map:.4f}")
 
+            # Always write a rolling latest.pth so an interrupted long run
+            # resumes from the epoch it actually reached — not from the last
+            # epoch that happened to improve mAP.
+            self.save_checkpoint(epoch, tag="latest")
+
         if self.select_loader is not None:
             logger.info("Final held-out evaluation on the val set...")
             final_val_map = self.evaluate(epochs)
@@ -336,14 +341,23 @@ class KDTrainer:
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
                     nn.utils.clip_grad_norm_(all_params, self.clip_max_norm)
+                    # AMP may SKIP the optimizer step when gradients contain
+                    # inf/NaN (routine while the scaler calibrates in the first
+                    # iterations). Stepping the LR scheduler regardless both
+                    # triggers PyTorch's "scheduler before optimizer" warning
+                    # and advances the schedule by a phantom step. A skipped
+                    # step is signalled by the scaler REDUCING its scale.
+                    scale_before = self.scaler.get_scale()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
+                    optimizer_stepped = self.scaler.get_scale() >= scale_before
                 else:
                     nn.utils.clip_grad_norm_(all_params, self.clip_max_norm)
                     self.optimizer.step()
+                    optimizer_stepped = True
 
                 self.optimizer.zero_grad()
-                if self.scheduler is not None:
+                if optimizer_stepped and self.scheduler is not None:
                     self.scheduler.step()
 
             # Accumulate scalar losses for logging
@@ -511,8 +525,15 @@ class KDTrainer:
             "loss_fn_state_dict": self.loss_fn.state_dict(),  # KD projection weights
             "optimizer_state_dict": self.optimizer.state_dict(),
             "best_map": self.best_map,
+            "global_step": self.global_step,
             "cfg": self.cfg,
         }
+        # The LR scheduler steps PER ITERATION. Without its state a resumed
+        # run restarts the cosine+warmup schedule from iteration 0, silently
+        # re-warming up and following the wrong LR curve for the remainder of
+        # training — a correctness bug, not just a cosmetic one.
+        if self.scheduler is not None:
+            checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
         if self.scaler is not None:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
 
@@ -548,6 +569,17 @@ class KDTrainer:
         if self.scaler is not None and "scaler_state_dict" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
+        if self.scheduler is not None:
+            if "scheduler_state_dict" in checkpoint:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            else:
+                logger.warning(
+                    "load_checkpoint: no scheduler state in checkpoint — the LR "
+                    "schedule will restart from iteration 0. Expected only for "
+                    "checkpoints written before scheduler state was saved."
+                )
+
+        self.global_step = checkpoint.get("global_step", 0)
         self.best_map = checkpoint.get("best_map", 0.0)
         epoch = checkpoint.get("epoch", 0)
         logger.info(f"Loaded checkpoint from epoch {epoch}: {path}")
