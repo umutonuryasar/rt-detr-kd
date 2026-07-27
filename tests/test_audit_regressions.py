@@ -467,25 +467,51 @@ _OLD_TO_NEW_PREFIX = {
 }
 
 
-def _load_pre_change_encoder_module(tmp_path):
-    """Import src/models/encoder.py as it was at HEAD (before the P-1 edit)."""
+_PRE_P1_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "encoder_pre_p1.py"
+
+
+def _load_pre_change_encoder_module():
+    """Import the vendored pre-P-1 encoder (tests/fixtures/encoder_pre_p1.py).
+
+    This used to run `git show HEAD:src/models/encoder.py`, which worked only
+    while the P-1 edit was uncommitted. Once P-1 landed, HEAD *was* the new
+    code, so these tests compared the post-change encoder against itself and
+    happily reported a parameter delta of 0. The baseline is now vendored at
+    commit 023947a, so it cannot drift with the branch and works in a shallow
+    clone.
+    """
     import importlib.util
-    import subprocess
 
-    try:
-        src = subprocess.run(
-            ["git", "show", "HEAD:src/models/encoder.py"],
-            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover
-        pytest.skip(f"pre-change encoder unavailable from git: {exc}")
-
-    path = tmp_path / "encoder_pre_p1.py"
-    path.write_text(src)
-    spec = importlib.util.spec_from_file_location("encoder_pre_p1", path)
+    assert _PRE_P1_FIXTURE.is_file(), (
+        f"missing pre-change encoder fixture at {_PRE_P1_FIXTURE} — it is "
+        "committed on purpose; see the file header."
+    )
+    spec = importlib.util.spec_from_file_location("encoder_pre_p1", _PRE_P1_FIXTURE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_pre_p1_fixture_is_actually_the_old_encoder():
+    """Guard the guard: the fixture must not have drifted to current code.
+
+    If someone "fixes" a failing equivalence test by editing the fixture, this
+    fires. The fixture's whole value is that it still contains the dead branch.
+    """
+    old_mod = _load_pre_change_encoder_module()
+    enc = old_mod.HybridEncoder(in_channels=[128, 256, 512], hidden_dim=32,
+                                num_encoder_layers=1, nhead=4,
+                                dim_feedforward=64, num_csp_blocks=1)
+    names = dict(enc.named_parameters())
+    assert any(n.startswith("fusion_c3.") for n in names), (
+        "fixture has no fusion_c3 — it is no longer the pre-P-1 encoder"
+    )
+    assert len(enc.input_proj) == 3, (
+        f"fixture projects {len(enc.input_proj)} scales, expected 3 (C3+C4+C5)"
+    )
+    # And it must still consume the C3 backbone key the current encoder dropped.
+    import inspect
+    assert 'features["0"]' in inspect.getsource(old_mod.HybridEncoder.forward)
 
 
 def _remap_old_state_dict(old_sd, new_sd):
@@ -514,11 +540,11 @@ def _remap_old_state_dict(old_sd, new_sd):
 
 
 @pytest.mark.parametrize("mode", ["eval", "train"])
-def test_p1_encoder_output_is_bit_identical_to_pre_change(tmp_path, mode):
+def test_p1_encoder_output_is_bit_identical_to_pre_change(mode):
     """THE GATE for P-1: removing the C3 branch must change no output value."""
     from src.models.encoder import HybridEncoder
 
-    old_mod = _load_pre_change_encoder_module(tmp_path)
+    old_mod = _load_pre_change_encoder_module()
 
     in_channels = [128, 256, 512]
     torch.manual_seed(0)
@@ -562,9 +588,7 @@ def test_p1_encoder_output_is_bit_identical_to_pre_change(tmp_path, mode):
     "backbone, expected_drop",
     [("resnet18", 477_824), ("resnet50", 576_128)],
 )
-def test_p1_removes_exactly_the_audited_parameter_count(
-    tmp_path, backbone, expected_drop
-):
+def test_p1_removes_exactly_the_audited_parameter_count(backbone, expected_drop):
     """A different delta means the edit removed something other than the audit target.
 
     Measured against the real pre-change encoder from git, at the production
@@ -573,7 +597,7 @@ def test_p1_removes_exactly_the_audited_parameter_count(
     from src.models.backbone import BACKBONE_OUT_CHANNELS
     from src.models.encoder import HybridEncoder
 
-    old_mod = _load_pre_change_encoder_module(tmp_path)
+    old_mod = _load_pre_change_encoder_module()
     channels = BACKBONE_OUT_CHANNELS[backbone]
 
     old_enc = old_mod.HybridEncoder(in_channels=channels, hidden_dim=256)
