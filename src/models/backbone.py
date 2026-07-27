@@ -56,10 +56,14 @@ BACKBONE_OUT_CHANNELS = {
 class ResNetBackbone(nn.Module):
     """ResNet backbone returning multi-scale feature maps.
 
-    Returns features from three stages:
-      '0' -> C3 (stride 8 relative to input)
+    Returns the two stages that HybridEncoder actually consumes:
       '1' -> C4 (stride 16 relative to input)
       '2' -> C5 (stride 32 relative to input)
+
+    C3 (stride 8) is still computed — layer3/layer4 are stacked on top of it —
+    but is no longer returned: the encoder's C3 fusion branch was dead code
+    (see AUDIT.md, fix P-1). Keys are kept at their original scale indices so
+    '1'/'2' keep meaning C4/C5.
 
     Args:
         name: One of 'resnet18' or 'resnet50'.
@@ -117,14 +121,15 @@ class ResNetBackbone(nn.Module):
 
         Returns:
             Dictionary mapping scale index (str) to feature tensor:
-              '0': C3 features [B, C3, H/8, W/8]
               '1': C4 features [B, C4, H/16, W/16]
               '2': C5 features [B, C5, H/32, W/32]
         """
         x = self.stem(x)
         x = self.layer1(x)
+        # c3 is not returned, but layer3/layer4 are computed from it — this is
+        # a required intermediate, not dead code.
         c3 = self.layer2(x)   # stride 8
         c4 = self.layer3(c3)  # stride 16
         c5 = self.layer4(c4)  # stride 32
 
-        return {"0": c3, "1": c4, "2": c5}
+        return {"1": c4, "2": c5}

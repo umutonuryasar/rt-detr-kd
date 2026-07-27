@@ -10,10 +10,15 @@ Each feature dimension D is treated as a "channel" with a distribution over
 N spatial positions. KL divergence is applied between softmax-normalized
 teacher and student channel distributions.
 
-  L_CWD = sum_c KL( softmax_spatial(t_c / tau) || softmax_spatial(s_c / tau) )
+  L_CWD = (tau^2 / C) * sum_c KL( softmax_spatial(t_c / tau) || softmax_spatial(s_c / tau) )
 
 A 1x1 Conv1d projection aligns student channels to teacher channels before
 computing the loss.
+
+The tau^2 factor follows Shu et al. and keeps gradient magnitudes comparable
+as tau varies; without it the effective KD weight would silently scale with
+1/tau^2, confounding a temperature sweep with a lambda sweep. It is a no-op
+at the ablation's fixed tau=1.0.
 
 Multi-scale alignment: when per-scale shapes are provided the sequences are
 split per scale, paired from the coarsest end, 2-D-aligned within each scale,
@@ -104,17 +109,22 @@ class CWDLoss(nn.Module):
         s_norm = F.log_softmax(s / self.tau, dim=-1)   # log-probs for KLDiv input
         t_norm = F.softmax(t / self.tau, dim=-1)       # probs for KLDiv target
 
-        # KL divergence summed over channels and spatial positions, averaged
-        # over batch.  Using reduction="batchmean" on the [B*D, N] view would
-        # divide by B*D instead of B, making the loss D (=256) times too small.
-        # reduction="sum" / B gives the correct per-sample channel-sum.
+        # KL divergence summed over spatial positions, averaged over BOTH the
+        # batch and the channel axis — i.e. the per-(sample, channel) mean KL.
+        # Shu et al. normalize by the channel count (L = tau^2/C * sum_c sum_n),
+        # so dividing by B alone inflates the loss by a factor of D (=256) and
+        # makes lambda incomparable with every other KD method here.
+        # This is exactly what reduction="batchmean" computes on the [B*D, N]
+        # view; it is written out explicitly to keep the normalizer visible.
+        # The tau^2 factor restores the reference gradient scaling (no-op at
+        # tau=1.0, which is what the ablation uses).
         B, D, N = s_norm.shape
         loss = F.kl_div(
             s_norm.reshape(B * D, N),
             t_norm.reshape(B * D, N),
             reduction="sum",
-        ) / B
-        return loss
+        ) / (B * D)
+        return loss * (self.tau ** 2)
 
     def extra_repr(self) -> str:
         return (

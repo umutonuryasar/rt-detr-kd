@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
-# Run final paper experiments on full COCO 118K for 72 epochs.
+# ============================================================================
+#  OUT OF CURRENT SCOPE — NOT PART OF THE CAMPAIGN. DO NOT RUN.
+# ============================================================================
 #
-# Runs the 6 configurations selected for the production-oriented showcase,
-# each repeated with 3 random seeds for mean ± std reporting (Phase 2D + 2E):
-#   - run00: Baseline (no KD)
-#   - run05: Logit-KD λ=1.0, T=4
-#   - run08: Feature-KD λ=1.0
-#   - run14: CWD (Channel-Wise Distillation, ICCV'21 baseline)
-#   - run16: Query-KD (novel: decoder object query distillation)
-#   - run17: Stage-Adaptive KD, cosine schedule (novel: curriculum weighting)
+# This script implements the SUPERSEDED full-COCO plan (Phase 2D/2E: 72 epochs,
+# 3 seeds, run05/run08/run14/run16/run17 numbering). That plan was cut in the
+# July 2026 scope decision — see TECH_REPORT_PLAN.md and CLAUDE.md.
 #
-# Usage:
-#   bash scripts/run_final.sh [COCO_ROOT] [OUTPUT_ROOT]
+# The campaign is:
+#   scripts/run_ablation.sh   — 9 runs, COCO 30K subset, 36 epochs, seed 42
 #
-# Prerequisites:
+# The run ids below no longer exist. Anything here is a starting point ONLY if
+# the project is later extended to full COCO; it has not been re-audited and
+# it does not carry the ablation script's failure isolation or its
+# seed/selection-split guarantees.
+#
+# Prerequisites (if ever revived):
 #   - Full COCO downloaded (see scripts/download_coco_full.sh)
 #   - Teacher weights available at $TEACHER_WEIGHTS
 
 set -euo pipefail
+
+if [ "${I_KNOW_THIS_IS_OUT_OF_SCOPE:-0}" != "1" ]; then
+    echo "run_final.sh is out of current scope (superseded full-COCO plan)." >&2
+    echo "The campaign script is scripts/run_ablation.sh." >&2
+    echo "To run this anyway: I_KNOW_THIS_IS_OUT_OF_SCOPE=1 bash scripts/run_final.sh" >&2
+    exit 2
+fi
 
 COCO_ROOT="${1:-$HOME/data/coco}"
 OUTPUT_ROOT="${2:-runs_final}"

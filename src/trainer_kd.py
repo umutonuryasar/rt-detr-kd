@@ -14,10 +14,12 @@ import os
 import json
 import time
 import math
+import random
 import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -94,6 +96,10 @@ def build_lr_scheduler(
         if current_iter < warmup_iters:
             return float(current_iter) / max(1, warmup_iters)
         progress = float(current_iter - warmup_iters) / max(1, total_iters - warmup_iters)
+        # total_iters is an estimate (len(loader) * epochs // accumulate_steps).
+        # Without the clamp an under-estimate sends progress past 1.0 and the
+        # cosine turns back UP — the LR would rise again at the end of training.
+        progress = min(max(progress, 0.0), 1.0)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     # last_epoch=-1 + verbose=False avoids the "step before optimizer.step" warning
@@ -171,6 +177,13 @@ class KDTrainer:
                        untouched by model selection.
         select_ann_file: COCO annotation JSON for the selection split
                        (required when select_loader is given).
+        train_loader_generator: The torch.Generator driving train_loader's
+                       shuffling and worker seeding. When given it is
+                       re-seeded to ``seed + epoch`` at the start of every
+                       epoch, which makes the data order a pure function of
+                       (seed, epoch) and therefore identical whether or not
+                       the run was interrupted and resumed.
+        seed:          Base seed used for the per-epoch loader re-seeding.
     """
 
     def __init__(
@@ -186,6 +199,8 @@ class KDTrainer:
         scaler: Optional[GradScaler] = None,
         select_loader: Optional[DataLoader] = None,
         select_ann_file: Optional[str] = None,
+        train_loader_generator: Optional[torch.Generator] = None,
+        seed: int = 0,
     ):
         self.model = model.to(device)
         self.loss_fn = loss_fn.to(device)
@@ -195,6 +210,8 @@ class KDTrainer:
         self.val_loader = val_loader
         self.cfg = cfg
         self.device = device
+        self.train_loader_generator = train_loader_generator
+        self.seed = seed
 
         train_cfg = cfg.get("train", {})
         self.use_amp = train_cfg.get("use_amp", True) and device.type == "cuda"
@@ -308,6 +325,13 @@ class KDTrainer:
         """
         self.model.train()
         self.loss_fn.train()
+
+        # Pin this epoch's shuffle order (and worker augmentation seeds) to
+        # (seed, epoch). Without this, resuming at epoch N would replay the
+        # data order of epoch 1, because the loader generator is rebuilt at
+        # process start.
+        if self.train_loader_generator is not None:
+            self.train_loader_generator.manual_seed(self.seed + epoch)
 
         running_losses: dict[str, float] = {}
         num_batches = 0
@@ -461,8 +485,11 @@ class KDTrainer:
                 cy = img_boxes[:, 1] * orig_h
                 bw = img_boxes[:, 2] * orig_w
                 bh = img_boxes[:, 3] * orig_h
-                x0 = cx - bw / 2
-                y0 = cy - bh / 2
+                # clamp(min=0) matches tools/eval.py and the teacher mAP gate,
+                # so the selection-split mAP and the reported val mAP are
+                # produced by identical post-processing.
+                x0 = (cx - bw / 2).clamp(min=0)
+                y0 = (cy - bh / 2).clamp(min=0)
 
                 for j in range(img_scores.size(0)):
                     score = img_scores[j].item()
@@ -537,6 +564,18 @@ class KDTrainer:
         if self.scaler is not None:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
 
+        # RNG state. Colab sessions drop mid-run; without this a resumed run
+        # replays a different augmentation/data stream than an uninterrupted
+        # one, so "same seed" no longer implies "same run".
+        checkpoint["rng_state"] = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "torch_cuda": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
+        }
+
         filename = f"checkpoint_{tag}.pth" if tag else f"checkpoint_epoch{epoch:04d}.pth"
         path = self.output_dir / filename
         torch.save(checkpoint, path)
@@ -578,6 +617,31 @@ class KDTrainer:
                     "schedule will restart from iteration 0. Expected only for "
                     "checkpoints written before scheduler state was saved."
                 )
+
+        rng_state = checkpoint.get("rng_state")
+        if rng_state is not None:
+            # torch.load(map_location=cuda) moves the saved RNG tensors onto
+            # the GPU; set_rng_state requires CPU ByteTensors, so convert back.
+            def _as_cpu_byte(t: torch.Tensor) -> torch.Tensor:
+                return t.detach().cpu().to(torch.uint8)
+
+            random.setstate(rng_state["python"])
+            np.random.set_state(rng_state["numpy"])
+            torch.set_rng_state(_as_cpu_byte(rng_state["torch"]))
+            if rng_state.get("torch_cuda") is not None and torch.cuda.is_available():
+                try:
+                    torch.cuda.set_rng_state_all(
+                        [_as_cpu_byte(s) for s in rng_state["torch_cuda"]]
+                    )
+                except Exception as exc:
+                    # e.g. a different GPU count than the run that wrote it.
+                    logger.warning(f"load_checkpoint: could not restore CUDA RNG: {exc}")
+        else:
+            logger.warning(
+                "load_checkpoint: no RNG state in checkpoint — the augmentation "
+                "and data-order stream will differ from an uninterrupted run. "
+                "Expected only for checkpoints written before RNG state was saved."
+            )
 
         self.global_step = checkpoint.get("global_step", 0)
         self.best_map = checkpoint.get("best_map", 0.0)

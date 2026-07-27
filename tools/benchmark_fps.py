@@ -82,6 +82,11 @@ def measure_fps_cuda(
         (mean_fps, std_fps, all_fps_values)
     """
     model.eval()
+    # --fp16 must actually benchmark fp16: the model has to be halved too.
+    # (Previously the input was cast back with .float() on every call, so
+    # --fp16 silently reported fp32 numbers.)
+    if fp16:
+        model.half()
     dtype = torch.float16 if fp16 else torch.float32
     dummy = torch.zeros(1, 3, input_size, input_size, dtype=dtype, device=device)
 
@@ -89,7 +94,7 @@ def measure_fps_cuda(
     logger.info(f"Warming up for {warmup} iterations...")
     with torch.no_grad():
         for _ in range(warmup):
-            _ = model(dummy.float())
+            _ = model(dummy)
     torch.cuda.synchronize()
 
     # Measurement with CUDA events
@@ -101,7 +106,7 @@ def measure_fps_cuda(
     with torch.no_grad():
         for _ in range(iters):
             start_event.record()
-            _ = model(dummy.float())
+            _ = model(dummy)
             end_event.record()
             torch.cuda.synchronize()
             elapsed_ms = start_event.elapsed_time(end_event)
@@ -163,6 +168,12 @@ def main() -> None:
     # Build model
     with open(args.cfg) as f:
         cfg = yaml.safe_load(f)
+
+    # Deployment never captures cross-attention maps; capturing them forces
+    # nn.MultiheadAttention off its fused fast path, so leaving the config
+    # default (True) would report an FPS number no deployed model ever sees —
+    # and one inconsistent with the TensorRT latency table.
+    cfg.setdefault("model", {})["capture_attn"] = False
 
     logger.info(f"Building model from config: {args.cfg}")
     model = build_rtdetr(cfg)

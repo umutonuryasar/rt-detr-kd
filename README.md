@@ -13,7 +13,7 @@
 
 ## Motivation
 
-RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNet-50 backbone is ill-suited to edge hardware: a direct swap to ResNet-18 (17M params) costs several mAP points with no principled recovery strategy. Knowledge distillation transfers structural and semantic signal from a frozen teacher to a lightweight student, but most KD literature targets CNN detectors — it is unclear how logit-level versus feature-level versus query-level distillation interact with the transformer encoder-decoder architecture that RT-DETR uses. This work runs a controlled ablation across five KD methods on a fixed 4 GB RTX 3050 budget, introduces two transformer-specific techniques (Query-KD and Stage-Adaptive KD), and carries the best configuration through TensorRT INT8 quantization to a deployable FastAPI server.
+RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNet-50 backbone is ill-suited to edge hardware: a direct swap to ResNet-18 (15.9M params in this student) costs several mAP points with no principled recovery strategy. Knowledge distillation transfers structural and semantic signal from a frozen teacher to a lightweight student, but most KD literature targets CNN detectors — it is unclear how logit-level versus feature-level versus query-level distillation interact with the transformer encoder-decoder architecture that RT-DETR uses. This work runs a controlled ablation across five KD methods on a fixed 4 GB RTX 3050 budget, introduces two transformer-specific techniques (Query-KD and Stage-Adaptive KD), and carries the best configuration through TensorRT INT8 quantization to a deployable FastAPI server.
 
 ---
 
@@ -38,16 +38,16 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 | # | Method | mAP@\[.5:.95\] | ΔmAP | FPS (RTX 3050) | Params |
 |---|--------|---------------|------|----------------|--------|
-| 0 | Baseline (no KD) | — | — | — | 17M |
-| 1 | Logit-KD, binary KL (λ=1.0, T=4) | — | — | — | 17M |
-| 2 | Logit-KD, softmax KL *(formulation ablation)* | — | — | — | 17M |
-| 3 | Feature-KD (enc + attn) | — | — | — | 17M |
-| 4 | CWD — Shu et al. ICCV'21 | — | — | — | 17M |
-| 5 | **Query-KD, Hungarian** *(novel)* | — | — | — | 17M |
-| 6 | Query-KD, index *(matching ablation)* | — | — | — | 17M |
-| 7 | **Stage-Adaptive, cosine** *(novel)* | — | — | — | 17M |
-| 8 | Stage-Adaptive, inverse-cosine *(direction control)* | — | — | — | 17M |
-| — | Teacher (own R50, trained in this repo) | TBD | ref | — | 32M |
+| 0 | Baseline (no KD) | — | — | — | 15.9M |
+| 1 | Logit-KD, binary KL (λ=1.0, T=4) | — | — | — | 15.9M |
+| 2 | Logit-KD, softmax KL *(formulation ablation)* | — | — | — | 15.9M |
+| 3 | Feature-KD (enc + attn) | — | — | — | 15.9M |
+| 4 | CWD — Shu et al. ICCV'21 | — | — | — | 15.9M |
+| 5 | **Query-KD, Hungarian** *(novel)* | — | — | — | 15.9M |
+| 6 | Query-KD, index *(matching ablation)* | — | — | — | 15.9M |
+| 7 | **Stage-Adaptive, cosine** *(novel)* | — | — | — | 15.9M |
+| 8 | Stage-Adaptive, inverse-cosine *(direction control)* | — | — | — | 15.9M |
+| — | Teacher (own R50, trained in this repo) | TBD | ref | — | 28.9M |
 
 **Protocol:** COCO 30K subset (27.5K train / 2.5K selection split), 36 epochs, 512 px, fixed seed 42, identical teacher weights across all runs. Checkpoint selection uses the selection split; val2017 is touched once per run. Single seed — differences are reported as-is, without statistical-significance claims.
 
@@ -61,10 +61,12 @@ The main ablation pairs the simplified student with an **own-architecture R50 te
 
 | Role | Backbone | Source | Params | mAP@\[.5:.95\] |
 |------|----------|--------|--------|---------------|
-| Student (simplified, this repo) | ResNet-18 | trained here | 17M | TBD |
-| Teacher (own, main ablation) | ResNet-50 | trained here | 32M | TBD |
+| Student (simplified, this repo) | ResNet-18 | trained here | 15.9M | TBD |
+| Teacher (own, main ablation) | ResNet-50 | trained here | 28.9M | TBD |
 | Teacher RT-DETR-M (cross-arch option) | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3 |
 | Teacher RT-DETR-L (cross-arch option) | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1 |
+
+Rows trained here are exact counts for the architecture as it ships (student 15,948,564; own teacher 28,869,908). Both are ~0.5M lower than earlier drafts of this table: a pre-campaign audit found the encoder's C3 fusion branch produced a tensor nothing consumed, so 477,824 student / 576,128 teacher parameters never received a gradient. The branch was removed before any checkpoint existed; encoder outputs are bit-identical (`tests/test_audit_regressions.py::test_p1_encoder_output_is_bit_identical_to_pre_change`). Cross-architecture rows are the upstream published counts.
 
 ### Implementation differences (student only)
 
@@ -143,7 +145,7 @@ $$\mathcal{L}_{\text{attn}} = 1 - \cos\!\left(s_{\text{attn}},\, t_{\text{attn}}
 
 $$\mathcal{L}_{\text{KD}} = w_f \cdot \mathcal{L}_{\text{feat}} + \alpha \cdot \mathcal{L}_{\text{attn}}$$
 
-Encoder sequences are concatenations of flattened scales (student C4+C5, teacher C3+C4+C5); alignment is **per scale in 2-D** — sequences are split back into their scale chunks, paired from the coarsest end (C5↔C5, C4↔C4), and the teacher's extra C3 scale is dropped rather than blended in.
+Encoder sequences are concatenations of flattened scales; alignment is **per scale in 2-D** — sequences are split back into their scale chunks, paired from the coarsest end (C5↔C5, C4↔C4), and any extra fine teacher scale is dropped rather than blended in. The own-architecture R50 teacher shares the student's C4+C5 memory, so the pairing is exact there; the dropping rule matters for the cross-architecture (lyuwenyu, C3+C4+C5) teacher.
 
 > **Note (canonical teacher):** the lyuwenyu deformable-attention teacher does not expose dense $[Q, N]$ cross-attention maps, so $\mathcal{L}_{\text{attn}}$ is **inactive** in the cross-architecture setup — Feature-KD reduces to the encoder term there. The main ablation uses the own-architecture teacher, where both terms are active; results tables state which configuration each run used.
 
@@ -151,7 +153,9 @@ Encoder sequences are concatenations of flattened scales (student C4+C5, teacher
 
 Spatially-normalized channel distributions aligned via KL divergence:
 
-$$\mathcal{L}_{\text{CWD}} = \sum_{c=1}^{C} \mathrm{KL}\!\left(\tilde{t}_c \,\Big\|\, \tilde{s}_c\right), \qquad \tilde{t}_c = \mathrm{softmax}\!\left(\tfrac{t_c}{\tau}\right)_{\text{spatial}}$$
+$$\mathcal{L}_{\text{CWD}} = \frac{1}{C}\sum_{c=1}^{C} \mathrm{KL}\!\left(\tilde{t}_c \,\Big\|\, \tilde{s}_c\right), \qquad \tilde{t}_c = \mathrm{softmax}\!\left(\tfrac{t_c}{\tau}\right)_{\text{spatial}}$$
+
+Normalized by the channel count as in the reference, so $\lambda$ stays on the same scale as the other methods. The reference's additional $\tau^2$ gradient-scaling factor is omitted; it is a no-op at the ablation's fixed $\tau = 1.0$ and must be restored before any $\tau$ sweep.
 
 ### Query-KD *(novel)*
 

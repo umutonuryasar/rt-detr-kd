@@ -108,7 +108,12 @@ class StageAdaptiveKDLoss(nn.Module):
         """Compute stage-adaptive KD loss.
 
         Args:
-            epoch:          Current training epoch (0-indexed).
+            epoch:          Current training epoch. KDTrainer passes a
+                            1-indexed epoch (1..E), so the schedule spans
+                            w_feat(1)=cos(pi/2E) down to w_feat(E)=0 — the
+                            first epoch is very nearly, but not exactly,
+                            fully feature-weighted. Intentional; documented
+                            so the reported curve matches the code.
             student_enc:    [B, N_s, D_s] — student encoder output.
             teacher_enc:    [B, N_t, D_t] — teacher encoder output (detached).
             student_logits: [B, Q_s, num_classes] — student class logits.

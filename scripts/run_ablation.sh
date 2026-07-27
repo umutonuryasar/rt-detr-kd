@@ -168,7 +168,7 @@ run_experiment() {
         $map_gate_flag \
         $run_extra_args \
         $EXTRA_TRAIN_ARGS \
-        2>&1 | tee "$output_dir/train.log"
+        2>&1 | tee "$output_dir/train.log" || return $?
 
     echo ""
     echo "  Benchmarking FPS for $tag..."
@@ -179,7 +179,7 @@ run_experiment() {
         --warmup 50 \
         --iters 500 \
         --device cuda \
-        2>&1 | tee "$output_dir/fps.log"
+        2>&1 | tee "$output_dir/fps.log" || return $?
 
     echo ""
     echo "  Evaluating $tag on COCO val..."
@@ -189,12 +189,45 @@ run_experiment() {
         --coco-val "$VAL_IMG" \
         --val-ann "$VAL_ANN" \
         --img-size "$IMG_SIZE" \
-        2>&1 | tee "$output_dir/eval.log"
+        2>&1 | tee "$output_dir/eval.log" || return $?
 
     echo "  Finished $tag."
 }
 
+# ---- Failure isolation ----
+# One dead run (OOM, dropped mount, corrupt image) must not cancel the runs
+# after it — the whole point of unattended overnight execution. Failures are
+# recorded and the ablation continues; the script exits non-zero at the end.
+#
+# NOTE on `set -e`: invoking a function under `||` disables errexit inside its
+# entire body, which is why every stage in run_experiment carries an explicit
+# `|| return $?`. Without those, a failed training run would fall through to
+# benchmarking and evaluating a checkpoint that does not exist.
+run_or_record() {
+    local run_id="$1"
+    local tag="$5"
+    local status=0
+
+    run_experiment "$@" || status=$?
+
+    if [ "$status" -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "  ✗ FAILED — run $run_id ($tag) exited with status $status."
+    echo "    Continuing with the next run. Log: $OUTPUT_ROOT/$tag/train.log"
+    printf 'run %s\t%s\texit=%s\n' "$run_id" "$tag" "$status" >> "$FAILURES_FILE"
+    return 0
+}
+
 mkdir -p "$OUTPUT_ROOT"
+
+# Start each invocation with a clean failure ledger, otherwise a re-run that
+# skips every already-completed run would still exit non-zero from stale
+# entries.
+FAILURES_FILE="$OUTPUT_ROOT/failures.txt"
+rm -f "$FAILURES_FILE"
 
 # Track start time
 ABLATION_START=$(date +%s)
@@ -203,41 +236,41 @@ echo "Output root: $OUTPUT_ROOT"
 echo ""
 
 # ---- Run 0: Baseline (no KD) ----
-run_experiment 0 "none" "0.0" "4" "run00_baseline"
+run_or_record 0 "none" "0.0" "4" "run00_baseline"
 
 # ---- Run 1: Logit-KD, binary KL (sigmoid-matched default) ----
-run_experiment 1 "logit" "1.0" "4" "run01_logit_binary_t4" \
+run_or_record 1 "logit" "1.0" "4" "run01_logit_binary_t4" \
     "" "--logit-mode binary"
 
 # ---- Run 2: Logit-KD, softmax KL (formulation ablation) ----
-run_experiment 2 "logit" "1.0" "4" "run02_logit_softmax_t4" \
+run_or_record 2 "logit" "1.0" "4" "run02_logit_softmax_t4" \
     "" "--logit-mode softmax"
 
 # ---- Run 3: Feature-KD (enc MSE + attention; attn needs own teacher) ----
-run_experiment 3 "feature" "1.0" "4" "run03_feature_l1.0"
+run_or_record 3 "feature" "1.0" "4" "run03_feature_l1.0"
 
 # ---- Run 4: CWD (Shu et al., ICCV'21 literature baseline) ----
-run_experiment 4 "cwd" "1.0" "4" "run04_cwd_l1.0" \
+run_or_record 4 "cwd" "1.0" "4" "run04_cwd_l1.0" \
     "configs/kd/cwd_kd.yml"
 
 # ---- Run 5: Query-KD, hungarian matching (novel #1) ----
-run_experiment 5 "query" "1.0" "4" "run05_query_hungarian" \
+run_or_record 5 "query" "1.0" "4" "run05_query_hungarian" \
     "configs/kd/query_kd.yml" "--query-matching hungarian"
 
 # ---- Run 6: Query-KD, index matching (matching-contribution ablation) ----
-run_experiment 6 "query" "1.0" "4" "run06_query_index" \
+run_or_record 6 "query" "1.0" "4" "run06_query_index" \
     "configs/kd/query_kd.yml" "--query-matching index"
 
 # ---- Run 7: Stage-Adaptive, cosine (novel #2) ----
-run_experiment 7 "stage_adaptive" "1.0" "4" "run07_stage_adaptive_cosine" \
+run_or_record 7 "stage_adaptive" "1.0" "4" "run07_stage_adaptive_cosine" \
     "configs/kd/stage_adaptive_kd.yml" "--schedule cosine"
 
 # ---- Run 8: Stage-Adaptive, inverse_cosine (curriculum-direction control) ----
-run_experiment 8 "stage_adaptive" "1.0" "4" "run08_stage_adaptive_invcos" \
+run_or_record 8 "stage_adaptive" "1.0" "4" "run08_stage_adaptive_invcos" \
     "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
 
 # ---- Run 9 (OPTIONAL): MGD extra literature baseline ----
-# run_experiment 9 "mgd" "1.0" "4" "run09_mgd" \
+# run_or_record 9 "mgd" "1.0" "4" "run09_mgd" \
 #     "configs/kd/archive/mgd_kd.yml"
 
 # ---- Summary ----
@@ -246,9 +279,23 @@ ELAPSED=$(( (ABLATION_END - ABLATION_START) / 60 ))
 
 echo ""
 echo "================================================================"
-echo " Ablation study complete!"
-echo " Total wall time: ${ELAPSED} minutes"
-echo "================================================================"
+if [ -s "$FAILURES_FILE" ]; then
+    echo " Ablation finished WITH FAILURES"
+    echo " Total wall time: ${ELAPSED} minutes"
+    echo "================================================================"
+    echo ""
+    echo "Failed runs ($FAILURES_FILE):"
+    cat "$FAILURES_FILE"
+    echo ""
+    echo "Re-running this script retries only the failed runs — completed runs"
+    echo "are skipped via checkpoint_best.pth + eval.log."
+    FINAL_STATUS=1
+else
+    echo " Ablation study complete!"
+    echo " Total wall time: ${ELAPSED} minutes"
+    echo "================================================================"
+    FINAL_STATUS=0
+fi
 echo ""
 echo "Collect results:"
 echo "  for d in $OUTPUT_ROOT/run*/; do"
@@ -257,3 +304,5 @@ echo "  done"
 echo ""
 echo "Or launch the notebook:"
 echo "  jupyter notebook notebooks/ablation_analysis.ipynb"
+
+exit "$FINAL_STATUS"

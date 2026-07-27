@@ -33,6 +33,7 @@ import argparse
 import logging
 import random
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -68,6 +69,39 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def seed_worker(worker_id: int) -> None:
+    """Re-seed python/numpy RNGs inside each DataLoader worker.
+
+    PyTorch derives every worker's torch seed from the loader's generator, but
+    the augmentation pipeline in src/data/transforms.py draws from python's
+    ``random`` module. Deriving those seeds from ``torch.initial_seed()`` ties
+    augmentation to the loader generator too, so augmentation is a pure
+    function of (--seed, epoch, sample index).
+    """
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_loader_generator(seed: int) -> torch.Generator:
+    """Build the DataLoader RNG for shuffling and worker seeding.
+
+    WHY THIS EXISTS (cross-run comparability, not cosmetics):
+    with ``generator=None`` a shuffling DataLoader seeds its sampler from the
+    *global* torch RNG at iterator-creation time. That state depends on how
+    much randomness the process consumed beforehand — and every KD method
+    consumes a different amount (CWDLoss/MGDLoss build a Xavier-initialised
+    Conv1d, FeatureKD/QueryKD do not, the baseline builds no teacher at all).
+    Two runs that should differ only in ``--kd-type`` therefore saw *different
+    training data orders*, confounding the ablation. Binding the loader to an
+    explicit, seed-derived generator makes the data order a function of --seed
+    alone.
+    """
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return g
+
+
 def load_yaml(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
@@ -85,7 +119,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-cfg", default="configs/rtdetr_r50vd_coco.yml",
                    help="Teacher model YAML config.")
     p.add_argument("--kd-cfg", default=None,
-                   help="Optional KD-specific YAML config (overrides CLI flags).")
+                   help="Optional KD-specific YAML config. Its keys override "
+                        "the CLI defaults, but a key that contradicts an "
+                        "EXPLICITLY passed CLI flag is a hard error — see "
+                        "_apply_kd_cfg_overrides().")
 
     # KD settings
     p.add_argument(
@@ -196,8 +233,108 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_cfg_from_args(args: argparse.Namespace) -> dict:
-    """Build a unified config dict from parsed arguments and YAML files."""
+# Maps the effective cfg["kd"] key to the CLI flag that also controls it.
+# Used to detect the "YAML silently overrode my CLI flag" trap.
+_KD_KEY_TO_CLI_FLAG = {
+    "type": "--kd-type",
+    "lambda": "--kd-lambda",
+    "temperature": "--temperature",
+    "alpha": "--alpha",
+    "feat_weight": "--feat-weight",
+    "logit_weight": "--logit-weight",
+    "feature_weight": "--feature-weight",
+    "tau": "--tau",
+    "mask_ratio": "--mask-ratio",
+    "schedule": "--schedule",
+    "logit_mode": "--logit-mode",
+    "query_matching": "--query-matching",
+}
+
+
+def _explicit_cli_flags(argv: Optional[list[str]] = None) -> set[str]:
+    """Return the set of long option strings actually present on the command line."""
+    argv = sys.argv[1:] if argv is None else argv
+    seen = set()
+    for token in argv:
+        if token.startswith("--"):
+            seen.add(token.split("=", 1)[0])
+    return seen
+
+
+def _values_differ(cli_value, yaml_value) -> bool:
+    """Compare a CLI value against a YAML value tolerantly (1.0 == 1 == '1.0')."""
+    if cli_value == yaml_value:
+        return False
+    try:
+        return float(cli_value) != float(yaml_value)
+    except (TypeError, ValueError):
+        return str(cli_value) != str(yaml_value)
+
+
+def _apply_kd_cfg_overrides(
+    kd_cfg: dict,
+    yaml_overrides: dict,
+    explicit_flags: set[str],
+) -> None:
+    """Merge KD YAML keys into ``kd_cfg`` in place, refusing silent conflicts.
+
+    The YAML merge runs AFTER argument parsing, so a key present in the KD
+    config wins over the corresponding CLI flag. That is fine when the flag
+    was left at its default, and a methodology-corrupting trap when it was
+    not: two ablation runs that differ only in a CLI flag would silently
+    train the same configuration. (This already happened once with
+    ``query_matching``, which is why configs/kd/query_kd.yml omits it.)
+
+    Overrides of default-valued flags are logged; overrides that contradict an
+    explicitly passed flag raise before any training starts.
+    """
+    conflicts = []
+    for key, value in yaml_overrides.items():
+        old = kd_cfg.get(key)
+        flag = _KD_KEY_TO_CLI_FLAG.get(key)
+        if flag in explicit_flags and _values_differ(old, value):
+            conflicts.append(f"  {flag} {old!r} (CLI) vs {key}: {value!r} (--kd-cfg)")
+        elif _values_differ(old, value):
+            logger.info(f"KD config override: {key}: {old!r} -> {value!r}")
+        kd_cfg[key] = value
+
+    if conflicts:
+        raise ValueError(
+            "--kd-cfg contradicts explicitly passed CLI flags:\n"
+            + "\n".join(conflicts)
+            + "\nThe YAML would silently win, which invalidates any ablation "
+              "that varies the flag. Remove the key from the KD config or "
+              "drop the CLI flag."
+        )
+
+
+# KD methods that actually read decoder cross-attention maps. For every other
+# type (none, logit, cwd, mgd) capture is disabled so PyTorch can take
+# nn.MultiheadAttention's fused fast path and skip storing [L, B, H, Q, N]
+# maps — meaningful VRAM/speed savings on the 4 GB budget, and it keeps the
+# baseline's runtime profile clean.
+_ATTN_KD_TYPES = ("feature", "combined", "query", "stage_adaptive")
+
+
+def apply_capture_attn(
+    kd_type: str, student_cfg: dict, teacher_cfg: Optional[dict] = None
+) -> bool:
+    """Set ``model.capture_attn`` on the student AND teacher configs.
+
+    The teacher config is a separate YAML that never sets the key, so before
+    this it defaulted to True and the teacher stored dense attention maps on
+    every forward — including for logit-KD and CWD, which never read them.
+    Student and teacher must agree: the flag is one setting, not two.
+    """
+    capture = kd_type in _ATTN_KD_TYPES
+    student_cfg.setdefault("model", {})["capture_attn"] = capture
+    if teacher_cfg is not None:
+        teacher_cfg.setdefault("model", {})["capture_attn"] = capture
+    return capture
+
+
+def build_cfg_from_args(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Build (student_cfg, teacher_cfg) from parsed arguments and YAML files."""
     # Load base config files
     student_cfg = load_yaml(args.student_cfg)
     teacher_cfg = load_yaml(args.teacher_cfg)
@@ -250,9 +387,12 @@ def build_cfg_from_args(args: argparse.Namespace) -> dict:
     #   (b) flat:    kd_type: ...,  kd_lambda: ..., tau: ..., mask_ratio: ...
     if args.kd_cfg and os.path.exists(args.kd_cfg):
         kd_yaml = load_yaml(args.kd_cfg)
+        explicit_flags = _explicit_cli_flags()
         # Schema (a): nested
         if "kd" in kd_yaml and isinstance(kd_yaml["kd"], dict):
-            student_cfg["kd"].update(kd_yaml["kd"])
+            _apply_kd_cfg_overrides(
+                student_cfg["kd"], kd_yaml["kd"], explicit_flags
+            )
         # Schema (b): flat top-level keys with kd_ prefix or known names
         flat_map = {
             "kd_type": "type",
@@ -268,9 +408,14 @@ def build_cfg_from_args(args: argparse.Namespace) -> dict:
             "logit_mode": "logit_mode",
             "query_matching": "query_matching",
         }
-        for yaml_key, cfg_key in flat_map.items():
-            if yaml_key in kd_yaml:
-                student_cfg["kd"][cfg_key] = kd_yaml[yaml_key]
+        flat_overrides = {
+            cfg_key: kd_yaml[yaml_key]
+            for yaml_key, cfg_key in flat_map.items()
+            if yaml_key in kd_yaml
+        }
+        _apply_kd_cfg_overrides(
+            student_cfg["kd"], flat_overrides, explicit_flags
+        )
 
     return student_cfg, teacher_cfg
 
@@ -417,6 +562,44 @@ def _teacher_map_gate(
     return teacher_map
 
 
+def resume_if_checkpoint(trainer, student_weights: Optional[str]) -> int:
+    """Resume from a full trainer checkpoint, returning the completed epoch.
+
+    Backbone-only / bare state-dict weight files (no 'epoch' key) fall back
+    gracefully: the model was already loaded with strict=False earlier and
+    training starts at epoch 1.
+
+    A file that DOES carry an 'epoch' key is a resume request, and a failure
+    to restore it is fatal. It used to be caught by a bare ``except
+    Exception`` that logged a warning and continued from epoch 1 — so an
+    unattended Colab run that dropped and relaunched would silently throw
+    away every completed epoch (and its optimizer, scheduler and scaler
+    state) instead of stopping. This was observed live: a CUDA-mapped RNG
+    tensor raised inside load_checkpoint and the run quietly restarted.
+    """
+    if not student_weights or not os.path.exists(student_weights):
+        return 0
+
+    try:
+        ckpt_probe = torch.load(student_weights, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read --student-weights {student_weights}: {exc}"
+        ) from exc
+
+    is_trainer_checkpoint = isinstance(ckpt_probe, dict) and "epoch" in ckpt_probe
+    del ckpt_probe
+
+    if not is_trainer_checkpoint:
+        logger.info(
+            "Student weights appear to be a bare state-dict (no 'epoch' key); "
+            "optimizer/scaler state not restored. Training from epoch 1."
+        )
+        return 0
+
+    return trainer.load_checkpoint(student_weights)
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -445,14 +628,7 @@ def main() -> None:
     )
 
     # ---- Build models ----
-    # Only these KD methods consume decoder cross-attention maps. For all
-    # others (baseline, logit, cwd, mgd) disable capture: PyTorch can then use
-    # its fused attention fast path and skips storing [L, B, H, Q, N] maps —
-    # meaningful VRAM/speed savings on the 4 GB budget, and it keeps the
-    # baseline's runtime profile clean.
-    _ATTN_KD_TYPES = ("feature", "combined", "query", "stage_adaptive")
-    capture_attn = effective_kd_type in _ATTN_KD_TYPES
-    cfg.setdefault("model", {})["capture_attn"] = capture_attn
+    capture_attn = apply_capture_attn(effective_kd_type, cfg, teacher_cfg_dict)
     logger.info(f"Decoder attention capture: {capture_attn} (kd_type={effective_kd_type})")
 
     logger.info("Building student model...")
@@ -596,6 +772,12 @@ def main() -> None:
     logger.info(f"Train set: {len(train_dataset)} images")
     logger.info(f"Val set:   {len(val_dataset)} images")
 
+    # Data order and augmentation must depend on --seed ONLY, never on how
+    # much RNG the model/loss construction happened to consume. See
+    # make_loader_generator().
+    loader_generator = make_loader_generator(args.seed)
+    val_loader_generator = make_loader_generator(args.seed)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_cfg["batch_size"],
@@ -604,6 +786,8 @@ def main() -> None:
         collate_fn=collate_fn,
         pin_memory=device.type == "cuda",
         drop_last=True,
+        generator=loader_generator,
+        worker_init_fn=seed_worker,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -612,6 +796,8 @@ def main() -> None:
         num_workers=data_cfg.get("num_workers", 4),
         collate_fn=collate_fn,
         pin_memory=device.type == "cuda",
+        generator=val_loader_generator,
+        worker_init_fn=seed_worker,
     )
 
     # Optional model-selection split (keeps the reported val set untouched
@@ -635,6 +821,8 @@ def main() -> None:
             num_workers=data_cfg.get("num_workers", 4),
             collate_fn=collate_fn,
             pin_memory=device.type == "cuda",
+            generator=make_loader_generator(args.seed),
+            worker_init_fn=seed_worker,
         )
 
     # ---- Teacher mAP sanity gate ----
@@ -683,27 +871,14 @@ def main() -> None:
         device=device,
         select_loader=select_loader,
         select_ann_file=data_cfg.get("select_ann"),
+        train_loader_generator=loader_generator,
+        seed=args.seed,
     )
 
     # Resume from a full trainer checkpoint (has epoch / optimizer / scaler).
     # Backbone-only weight files (no 'epoch' key) fall back gracefully: model
     # was already loaded above with strict=False; start_epoch stays 0.
-    start_epoch = 0
-    if args.student_weights and os.path.exists(args.student_weights):
-        try:
-            ckpt_probe = torch.load(
-                args.student_weights, map_location="cpu", weights_only=False
-            )
-            if isinstance(ckpt_probe, dict) and "epoch" in ckpt_probe:
-                start_epoch = trainer.load_checkpoint(args.student_weights)
-            else:
-                logger.info(
-                    "Student weights appear to be a bare state-dict (no 'epoch' key); "
-                    "optimizer/scaler state not restored. Training from epoch 1."
-                )
-        except Exception as exc:
-            logger.warning(f"Could not fully load checkpoint for resume: {exc}. "
-                           "Model weights were loaded earlier; continuing from epoch 1.")
+    start_epoch = resume_if_checkpoint(trainer, args.student_weights)
 
     logger.info(f"Starting from epoch {start_epoch + 1}")
     trainer.train(args.epochs, start_epoch=start_epoch)

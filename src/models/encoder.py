@@ -5,7 +5,8 @@ encoder to produce a flat sequence of encoded tokens from multi-scale
 backbone features.
 
 Architecture:
-  1. Project each backbone scale to hidden_dim via 1x1 conv + BN + activation.
+  1. Project the decoder-memory scales (C4, C5) to hidden_dim via
+     1x1 conv + BN + activation.
   2. Top-down feature fusion (FPN-style) using RepCSP blocks.
   3. Flatten all spatial positions and concatenate to form token sequence.
   4. Apply standard Transformer encoder layers.
@@ -158,7 +159,12 @@ class HybridEncoder(nn.Module):
     of encoded tokens suitable for the RT-DETR decoder.
 
     Args:
-        in_channels: List of channel counts for each backbone scale [C3, C4, C5].
+        in_channels: List of channel counts for each backbone scale
+                     [C3, C4, C5]. Only the last two are projected — C3 is
+                     not part of the decoder memory and its fusion branch was
+                     removed as dead code (AUDIT.md, fix P-1). The full list
+                     is still accepted so callers can keep passing
+                     BACKBONE_OUT_CHANNELS unchanged.
         hidden_dim: Common feature dimension throughout the encoder.
         num_encoder_layers: Number of Transformer encoder layers.
         nhead: Number of attention heads in the Transformer.
@@ -179,17 +185,21 @@ class HybridEncoder(nn.Module):
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.num_scales = len(in_channels)
 
         # ---------- input projections ----------
+        # Only the memory scales (C4, C5) are projected:
+        #   input_proj[0] -> C4 (backbone key '1')
+        #   input_proj[1] -> C5 (backbone key '2')
+        self.memory_in_channels = list(in_channels[-2:])
+        self.num_scales = len(self.memory_in_channels)
         self.input_proj = nn.ModuleList(
-            [ConvBnAct(c, hidden_dim, 1) for c in in_channels]
+            [ConvBnAct(c, hidden_dim, 1) for c in self.memory_in_channels]
         )
 
         # ---------- top-down fusion (FPN-style) ----------
-        # Fuse C5 into C4, then C4 into C3
+        # Fuse C5 into C4. (There is no C4->C3 fusion: C3 is not decoder
+        # memory, so its fused output had no consumer — see AUDIT.md P-1.)
         self.fusion_c4 = RepCSP(hidden_dim * 2, hidden_dim, num_csp_blocks)
-        self.fusion_c3 = RepCSP(hidden_dim * 2, hidden_dim, num_csp_blocks)
 
         # ---------- Transformer encoder ----------
         self.encoder_layers = nn.ModuleList(
@@ -215,22 +225,21 @@ class HybridEncoder(nn.Module):
         """Encode multi-scale backbone features.
 
         Follows the RT-DETR AIFI + CCFF design:
-          1. Project all scales to hidden_dim.
+          1. Project the memory scales (C4, C5) to hidden_dim.
           2. Apply Transformer encoder ONLY on C5 (coarsest, fewest tokens).
-          3. Top-down CSP fusion: C5_enc -> C4, C4_fused -> C3.
-          4. Return concatenation of all 3 encoded scales.
+          3. Top-down CSP fusion: C5_enc -> C4.
+          4. Return the concatenation of the C4 and C5 scales.
 
         Args:
-            features: Dict from backbone with keys '0', '1', '2' mapping to
-                      C3, C4, C5 feature tensors respectively.
+            features: Dict from backbone with keys '1', '2' mapping to
+                      C4, C5 feature tensors respectively.
 
         Returns:
             Encoded token sequence of shape [B, N_total, hidden_dim] where
-            N_total = H3*W3 + H4*W4 + H5*W5.
+            N_total = H4*W4 + H5*W5.
         """
-        c3 = self.input_proj[0](features["0"])  # [B, D, H/8,  W/8]
-        c4 = self.input_proj[1](features["1"])  # [B, D, H/16, W/16]
-        c5 = self.input_proj[2](features["2"])  # [B, D, H/32, W/32]
+        c4 = self.input_proj[0](features["1"])  # [B, D, H/16, W/16]
+        c5 = self.input_proj[1](features["2"])  # [B, D, H/32, W/32]
 
         # --- AIFI: Transformer encoder on C5 only (400 tokens at 640x640) ---
         B, D, H5, W5 = c5.shape
@@ -245,10 +254,7 @@ class HybridEncoder(nn.Module):
         c5_up = F.interpolate(c5_enc, size=c4.shape[-2:], mode="nearest")
         c4_fused = self.fusion_c4(torch.cat([c4, c5_up], dim=1))
 
-        c4_up = F.interpolate(c4_fused, size=c3.shape[-2:], mode="nearest")
-        c3_fused = self.fusion_c3(torch.cat([c3, c4_up], dim=1))
-
-        # Flatten C4 + C5 only as decoder memory (C3 is used for fusion only).
+        # Flatten C4 + C5 as decoder memory.
         # C4: H/16 * W/16 = 1600 tokens at 640x640
         # C5: H/32 * W/32 = 400 tokens at 640x640  → total 2000, manageable on 4 GB.
         # Store per-scale spatial shapes so KD losses can split the
