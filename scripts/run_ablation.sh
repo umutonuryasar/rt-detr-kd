@@ -76,6 +76,11 @@ LAM_QUERY_INDEX="${LAM_QUERY_INDEX:-1.0}"
 LAM_STAGE_COSINE="${LAM_STAGE_COSINE:-1.0}"
 LAM_STAGE_INVCOS="${LAM_STAGE_INVCOS:-1.0}"
 
+# Learning rate: 1e-3 (train_kd.py's default) collapses this architecture —
+# the teacher scored 0.027 at 1e-3 vs 0.142 at 1e-4. All runs use 1e-4.
+LR_HEAD="${LR_HEAD:-1e-4}"
+LR_BACKBONE="${LR_BACKBONE:-1e-5}"
+
 # Leakage-free splits (produced by tools/make_select_split.py, seed 42):
 #   *_train.json  = 30K subset MINUS the 2.5K selection images
 #   *_select.json = the 2.5K selection split (checkpoint selection only)
@@ -167,6 +172,8 @@ run_experiment() {
         --kd-type "$kd_type" \
         --kd-lambda "$kd_lambda" \
         --temperature "$temperature" \
+        --lr-head "$LR_HEAD" \
+        --lr-backbone "$LR_BACKBONE" \
         --epochs "$EPOCHS" \
         --batch-size "$BATCH_SIZE" \
         --img-size "$IMG_SIZE" \
