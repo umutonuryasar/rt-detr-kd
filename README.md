@@ -47,7 +47,7 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 | 6 | Query-KD, index *(matching ablation)* | — | — | — | 15.9M |
 | 7 | **Stage-Adaptive, cosine** *(novel)* | — | — | — | 15.9M |
 | 8 | Stage-Adaptive, inverse-cosine *(direction control)* | — | — | — | 15.9M |
-| — | Teacher (own R50, trained in this repo) | TBD | ref | — | 28.9M |
+| — | Teacher (own R50, trained in this repo) | 0.142 | ref | — | 28.9M |
 
 **Protocol:** COCO 30K subset (27.5K train / 2.5K selection split), 36 epochs, 512 px, fixed seed 42, identical teacher weights across all runs. Checkpoint selection uses the selection split; val2017 is touched once per run. Single seed — differences are reported as-is, without statistical-significance claims.
 
@@ -57,12 +57,12 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 ### Student vs. teacher
 
-The main ablation pairs the simplified student with an **own-architecture R50 teacher** trained in this repo: Query-KD and the cross-attention alignment terms require signals (post-norm decoder queries, dense $[Q, N]$ attention maps) that the canonical deformable-attention teacher does not expose. The **canonical lyuwenyu teacher adapter** is retained for an optional cross-architecture comparison covering the methods that survive without those signals (Logit-KD, CWD, encoder-only Feature-KD); upstream teacher mAPs below are from the official release.
+The main ablation pairs the simplified student with an **own-architecture R50 teacher** trained in this repo: Query-KD and the cross-attention alignment terms require signals (post-norm decoder queries, dense $[Q, N]$ attention maps) that the canonical deformable-attention teacher does not expose. This teacher reaches 0.142 mAP on val2017 — well below the canonical RT-DETR (53.1), a direct consequence of the deliberate simplifications (100 queries, 3 decoder layers, vanilla MHA, C4+C5 memory) and the 512 px / 36-epoch / 30K-subset budget. What the ablation needs is a teacher meaningfully stronger than the student so KD has signal to transfer, not a state-of-the-art teacher; the gap is documented as a scope limitation, not hidden. The **canonical lyuwenyu teacher adapter** is retained for an optional cross-architecture comparison covering the methods that survive without those signals (Logit-KD, CWD, encoder-only Feature-KD); upstream teacher mAPs below are from the official release.
 
 | Role | Backbone | Source | Params | mAP@\[.5:.95\] |
 |------|----------|--------|--------|---------------|
 | Student (simplified, this repo) | ResNet-18 | trained here | 15.9M | TBD |
-| Teacher (own, main ablation) | ResNet-50 | trained here | 28.9M | TBD |
+| Teacher (own, main ablation) | ResNet-50 | trained here | 28.9M | 0.142 |
 | Teacher RT-DETR-M (cross-arch option) | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3 |
 | Teacher RT-DETR-L (cross-arch option) | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1 |
 

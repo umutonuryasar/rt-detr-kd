@@ -51,13 +51,30 @@ TEACHER_WEIGHTS="${TEACHER_WEIGHTS:-}"      # R50 teacher weights (set externall
 #   bash scripts/run_ablation.sh /data/coco runs
 TEACHER_SOURCE="${TEACHER_SOURCE:-own}"      # own | lyuwenyu
 LYUWENYU_CFG="${LYUWENYU_CFG:-}"
-TEACHER_MIN_MAP="${TEACHER_MIN_MAP:-0.0}"    # 0.0 disables the gate
+TEACHER_MIN_MAP="${TEACHER_MIN_MAP:-0.10}"   # own teacher scores 0.142; gate ~5pts below
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"     # power-user escape hatch
 
 EPOCHS=36
 BATCH_SIZE="${BATCH_SIZE:-4}"    # 4 on RTX 3050 (4GB); 16 on Colab A100
 IMG_SIZE="${IMG_SIZE:-512}"      # 640 OOMs on RTX 3050 with teacher+student
 SEED=42                          # single fixed seed for the whole ablation
+
+# ---- Per-method KD lambda (from tools/calibrate_lambda.py) ----------------
+# lambda_method = median(L_det)/median(L_KD), measured at init so every KD term
+# STARTS at detection-loss scale. Running all methods at lambda=1.0 would
+# compare them at wildly different effective KD strengths (raw magnitudes span
+# ~1e5x). Paste the calibrated values below; keep them here (visible) rather
+# than in YAML, where a key can silently override the CLI flag.
+#
+# >>> REPLACE THESE PLACEHOLDERS with the calibrate_lambda.py output <<<
+LAM_LOGIT_BINARY="${LAM_LOGIT_BINARY:-1.0}"
+LAM_LOGIT_SOFTMAX="${LAM_LOGIT_SOFTMAX:-1.0}"
+LAM_FEATURE="${LAM_FEATURE:-1.0}"
+LAM_CWD="${LAM_CWD:-1.0}"
+LAM_QUERY_HUNGARIAN="${LAM_QUERY_HUNGARIAN:-1.0}"
+LAM_QUERY_INDEX="${LAM_QUERY_INDEX:-1.0}"
+LAM_STAGE_COSINE="${LAM_STAGE_COSINE:-1.0}"
+LAM_STAGE_INVCOS="${LAM_STAGE_INVCOS:-1.0}"
 
 # Leakage-free splits (produced by tools/make_select_split.py, seed 42):
 #   *_train.json  = 30K subset MINUS the 2.5K selection images
@@ -239,34 +256,34 @@ echo ""
 run_or_record 0 "none" "0.0" "4" "run00_baseline"
 
 # ---- Run 1: Logit-KD, binary KL (sigmoid-matched default) ----
-run_or_record 1 "logit" "1.0" "4" "run01_logit_binary_t4" \
+run_or_record 1 "logit" "$LAM_LOGIT_BINARY" "4" "run01_logit_binary_t4" \
     "" "--logit-mode binary"
 
 # ---- Run 2: Logit-KD, softmax KL (formulation ablation) ----
-run_or_record 2 "logit" "1.0" "4" "run02_logit_softmax_t4" \
+run_or_record 2 "logit" "$LAM_LOGIT_SOFTMAX" "4" "run02_logit_softmax_t4" \
     "" "--logit-mode softmax"
 
 # ---- Run 3: Feature-KD (enc MSE + attention; attn needs own teacher) ----
-run_or_record 3 "feature" "1.0" "4" "run03_feature_l1.0"
+run_or_record 3 "feature" "$LAM_FEATURE" "4" "run03_feature"
 
 # ---- Run 4: CWD (Shu et al., ICCV'21 literature baseline) ----
-run_or_record 4 "cwd" "1.0" "4" "run04_cwd_l1.0" \
+run_or_record 4 "cwd" "$LAM_CWD" "4" "run04_cwd" \
     "configs/kd/cwd_kd.yml"
 
 # ---- Run 5: Query-KD, hungarian matching (novel #1) ----
-run_or_record 5 "query" "1.0" "4" "run05_query_hungarian" \
+run_or_record 5 "query" "$LAM_QUERY_HUNGARIAN" "4" "run05_query_hungarian" \
     "configs/kd/query_kd.yml" "--query-matching hungarian"
 
 # ---- Run 6: Query-KD, index matching (matching-contribution ablation) ----
-run_or_record 6 "query" "1.0" "4" "run06_query_index" \
+run_or_record 6 "query" "$LAM_QUERY_INDEX" "4" "run06_query_index" \
     "configs/kd/query_kd.yml" "--query-matching index"
 
 # ---- Run 7: Stage-Adaptive, cosine (novel #2) ----
-run_or_record 7 "stage_adaptive" "1.0" "4" "run07_stage_adaptive_cosine" \
+run_or_record 7 "stage_adaptive" "$LAM_STAGE_COSINE" "4" "run07_stage_adaptive_cosine" \
     "configs/kd/stage_adaptive_kd.yml" "--schedule cosine"
 
 # ---- Run 8: Stage-Adaptive, inverse_cosine (curriculum-direction control) ----
-run_or_record 8 "stage_adaptive" "1.0" "4" "run08_stage_adaptive_invcos" \
+run_or_record 8 "stage_adaptive" "$LAM_STAGE_INVCOS" "4" "run08_stage_adaptive_invcos" \
     "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
 
 # ---- Run 9 (OPTIONAL): MGD extra literature baseline ----
