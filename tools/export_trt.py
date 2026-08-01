@@ -96,7 +96,7 @@ def export_onnx(weights_path: str, cfg_path: str, onnx_path: str,
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     model = build_rtdetr(cfg)
-    ckpt = torch.load(weights_path, map_location="cpu")
+    ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
     state = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(state, strict=False)
     model.eval()

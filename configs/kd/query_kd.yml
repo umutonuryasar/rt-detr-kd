@@ -1,5 +1,8 @@
 kd_type: query
-kd_lambda: 1.0
+# kd_lambda is intentionally NOT set here: it is calibrated per method by
+# tools/calibrate_lambda.py and passed via --kd-lambda from
+# scripts/run_ablation.sh. A value here would contradict the CLI flag and
+# the guard in train_kd.py would (correctly) refuse to run.
 alpha: 0.5    # weight for decoder cross-attention alignment term
 
 # query_matching is intentionally NOT set here: the YAML would override the

@@ -170,7 +170,7 @@ def main() -> None:
 
     # Load weights
     logger.info(f"Loading weights from: {args.weights}")
-    ckpt = torch.load(args.weights, map_location="cpu")
+    ckpt = torch.load(args.weights, map_location="cpu", weights_only=False)
     state = ckpt.get("model_state_dict", ckpt)
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:

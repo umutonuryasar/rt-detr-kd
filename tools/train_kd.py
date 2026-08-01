@@ -655,7 +655,7 @@ def main() -> None:
             logger.info(f"  Teacher params: {teacher.num_parameters:,}")
             if args.teacher_weights:
                 logger.info(f"Loading teacher weights from: {args.teacher_weights}")
-                ckpt = torch.load(args.teacher_weights, map_location="cpu")
+                ckpt = torch.load(args.teacher_weights, map_location="cpu", weights_only=False)
                 state = ckpt.get("model_state_dict", ckpt)
                 missing, unexpected = teacher.load_state_dict(state, strict=False)
                 _check_teacher_state_dict(teacher, missing, unexpected,
