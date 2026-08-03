@@ -57,7 +57,9 @@ EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"     # power-user escape hatch
 EPOCHS=36
 BATCH_SIZE="${BATCH_SIZE:-4}"    # 4 on RTX 3050 (4GB); 16 on Colab A100
 IMG_SIZE="${IMG_SIZE:-512}"      # 640 OOMs on RTX 3050 with teacher+student
-SEED=42                          # single fixed seed for the whole ablation
+SEED="${SEED:-42}"               # fixed per campaign; Phase 2B repeats
+                                 # key configs at 43/44 to separate real
+                                 # differences from seed noise
 
 # ---- Per-method KD lambda (from tools/calibrate_lambda.py) ----------------
 # lambda_method = median(L_det)/median(L_KD), measured at init so every KD term
@@ -227,10 +229,32 @@ run_experiment() {
 # entire body, which is why every stage in run_experiment carries an explicit
 # `|| return $?`. Without those, a failed training run would fall through to
 # benchmarking and evaluating a checkpoint that does not exist.
+# ONLY_RUNS restricts execution to a subset of run ids, e.g.
+#   ONLY_RUNS="0 5 6 7 8"  (Phase 2B: baseline + the two contested pairs)
+# Empty (default) runs everything. Selection happens here rather than by
+# commenting out lines, so every run still launches through the identical
+# run_experiment path — cross-run comparability is the whole point.
+ONLY_RUNS="${ONLY_RUNS:-}"
+
+should_run() {
+    [ -z "$ONLY_RUNS" ] && return 0
+    local want
+    for want in $ONLY_RUNS; do
+        [ "$want" = "$1" ] && return 0
+    done
+    return 1
+}
+
 run_or_record() {
     local run_id="$1"
     local tag="$5"
     local status=0
+
+    if ! should_run "$run_id"; then
+        echo ""
+        echo "  – Run $run_id ($tag) not in ONLY_RUNS — skipping."
+        return 0
+    fi
 
     run_experiment "$@" || status=$?
 
@@ -294,7 +318,23 @@ run_or_record 8 "stage_adaptive" "$LAM_STAGE_INVCOS" "4" "run08_stage_adaptive_i
     "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
 
 # ---- Run 9 (OPTIONAL): MGD extra literature baseline ----
-# run_or_record 9 "mgd" "1.0" "4" "run09_mgd" \
+# ---- Runs 9-10 (Phase 2B): lambda-swap controls for stage_adaptive --------
+# Calibration measured lambda at epoch 1, where cosine is feature-dominant
+# (large L_KD -> small lambda) and inverse_cosine is logit-dominant (small
+# L_KD -> large lambda). The weights then swap over training, so invcos ends
+# up carrying a much stronger late-stage feature signal. These two runs cross
+# the lambdas to complete a 2x2 and tell schedule DIRECTION apart from lambda:
+#
+#              lambda=6.324        lambda=22.51
+#   cosine     run07 (0.0553)      run09  <- new
+#   invcos     run10  <- new       run08 (0.0657)
+run_or_record 9 "stage_adaptive" "$LAM_STAGE_INVCOS" "4" "run09_stage_cosine_lam22" \
+    "configs/kd/stage_adaptive_kd.yml" "--schedule cosine"
+
+run_or_record 10 "stage_adaptive" "$LAM_STAGE_COSINE" "4" "run10_stage_invcos_lam6" \
+    "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
+
+# run_or_record 11 "mgd" "1.0" "4" "run11_mgd" \
 #     "configs/kd/archive/mgd_kd.yml"
 
 # ---- Summary ----
