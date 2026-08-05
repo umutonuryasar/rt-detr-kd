@@ -234,12 +234,19 @@ SEED=43 ONLY_RUNS="0 5 6 9" ... bash scripts/run_ablation.sh ~/data/coco runs_se
 the λ variables default to placeholder `1.0` and must be passed. The teacher is
 the same script's model config trained with `--kd-type none` on full COCO.
 
-> **Gap — the orchestration notebooks are not committed.** The teacher run and
-> the ablation were driven from two Colab notebooks that exist only in the
-> author's Drive; `notebooks/colab_training.ipynb` predates them and describes
-> the superseded 23-run plan. `runs/` is gitignored, so no campaign `eval.log`
-> is in version control either. The chain from a reported number to its script,
-> config and λ is complete; the chain to the exact cell that launched it is not.
+The full campaign is reproducible end to end from two committed notebooks:
+
+| Notebook | Produces |
+|---|---|
+| `notebooks/teacher_training_colab.ipynb` | The own R50 teacher (0.142 mAP) every run distils from |
+| `notebooks/ablation_colab.ipynb` | Phase 2A runs 0–8, the Phase 2B λ-swap and seed repeats, and the cross-seed comparison |
+
+They carry the exact λ values, seeds, LR flags and environment used, so the
+chain from a reported number to the cell that launched it is complete.
+
+> **Remaining gap.** `runs/` is gitignored, so the campaign's `eval.log` and
+> `results.csv` files are not in version control — the numbers in this README
+> are transcribed from them, not linked to them.
 
 ---
 
@@ -318,7 +325,8 @@ rt-detr-kd/
 ├── tests/            # pytest suite incl. methodology regression tests — runs on every push
 ├── scripts/          # run_ablation.sh — THE campaign script, every reported number;
 │                     # run_final.sh — full-COCO sketch, NOT part of this study, never run
-├── notebooks/        # ablation_analysis, visualize_attention, colab_training (all stale)
+├── notebooks/        # teacher_training_colab, ablation_colab — the campaign as run;
+│                     # ablation_analysis, visualize_attention — analysis helpers (stale)
 ├── serve/            # FastAPI inference server
 ├── third_party/      # lyuwenyu/RT-DETR submodule — canonical teacher weights + config
 └── .github/          # CI: pytest on push
@@ -402,9 +410,9 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 - [x] Phase 2A ablation — runs 0–8 on COCO 30K subset, 36 epochs, seed 42
 - [x] Phase 2B — λ-swap 2×2 (runs 9–10) and seed repeats at 43/44
 - [x] Results, Findings and Limitations in this README
+- [x] Campaign notebooks committed — teacher run and ablation reproducible end to end
 
 **Next — Phase 3**
-- [ ] Commit the two Colab notebooks that drove the teacher run and the ablation
 - [ ] TensorRT FP16/INT8 latency-vs-accuracy sweep on the best checkpoint
 - [ ] FPS benchmarking on the RTX 3050
 - [ ] Refresh the attention-visualization notebook against the campaign run tags
