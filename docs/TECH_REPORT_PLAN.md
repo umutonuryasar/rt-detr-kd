@@ -1,5 +1,15 @@
 # RT-DETR KD — Tech Report Plan
 
+> **Historical document — the plan the campaign was executed against.**
+> Weeks 0–2 are done; the campaign is complete. Two things went differently
+> from this plan and the difference is itself a result: λ=1.0 was replaced by
+> per-method calibrated λ (`tools/calibrate_lambda.py`), and the single-seed
+> rule was relaxed for four configurations, which were repeated at seeds
+> 43/44 as Phase 2B. The "narrative gate" below resolved to outcome (ii) —
+> both novel claims were reframed as negative/neutral findings. Weeks 3–4
+> (TensorRT sweep, demo, blog series) are Phase 3, still open.
+> Current state: [`../README.md`](../README.md), [`../CLAUDE.md`](../CLAUDE.md).
+
 **Scope decision (July 2026):** No arXiv paper. Deliverables are (1) a complete
 repo with an honest Results section, (2) a deployed demo, (3) a 3-part blog
 series. Phase 2A's ablation runs happen; full-COCO Phase 2D/2E is cut.

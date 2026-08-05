@@ -1,5 +1,11 @@
 # Trainer Fixes — resume correctness (apply before the teacher run)
 
+> **Historical document — kept verbatim as evidence.** Applied before the
+> teacher run, as the title says; the campaign has since completed. The
+> resume path was audited again in [`AUDIT.md`](AUDIT.md) §§ P0-2, P1-4, which
+> added RNG persistence and per-epoch loader re-seeding on top of these three
+> fixes. Condensed index: [`README.md`](README.md).
+
 Three fixes to `src/trainer_kd.py`, found while reviewing the smoke-run logs.
 
 ## 1. LR scheduler state was not saved/restored — **real bug**
