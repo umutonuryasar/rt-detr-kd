@@ -68,7 +68,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--score-thresh", type=float, default=0.01,
                    help="Minimum score to include in results.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--use-amp", action="store_true", default=True)
+    p.add_argument("--precision", choices=["fp32", "amp", "fp16"], default="amp",
+                   help="Numerical mode for inference. 'amp' (default) is "
+                        "torch autocast — the mode the training campaign used, "
+                        "so it reproduces the reported mAP. 'fp32' is full "
+                        "precision. 'fp16' halves the model, matching what "
+                        "tools/benchmark_fps.py --fp16 measures. Pair a "
+                        "latency number with the mAP measured in the SAME mode.")
+    p.add_argument("--use-amp", action="store_true", default=None,
+                   help="Deprecated alias for --precision amp.")
     p.add_argument("--output", default=None,
                    help="Path to save JSON results. Defaults to weights_dir/results.json.")
     return p.parse_args()
@@ -80,7 +88,7 @@ def run_inference(
     loader: DataLoader,
     device: torch.device,
     score_thresh: float = 0.01,
-    use_amp: bool = True,
+    precision: str = "amp",
 ) -> list[dict]:
     """Run model on all validation images and collect COCO-format predictions.
 
@@ -90,12 +98,18 @@ def run_inference(
     idx_to_coco_id = {i: cat_id for i, cat_id in enumerate(_COCO_CATEGORIES_80)}
 
     model.eval()
+    if precision == "fp16":
+        model.half()
     results = []
+
+    use_amp = precision == "amp" and device.type == "cuda"
 
     for images, targets in loader:
         images = images.to(device)
+        if precision == "fp16":
+            images = images.half()
 
-        with autocast("cuda", enabled=use_amp and device.type == "cuda"):
+        with autocast("cuda", enabled=use_amp):
             outputs = model(images)
 
         pred_logits = outputs["pred_logits"]  # [B, Q, C]
@@ -201,10 +215,16 @@ def main() -> None:
 
     # Run inference
     logger.info("Running inference...")
+    precision = args.precision
+    if args.use_amp:
+        logger.warning("--use-amp is deprecated; use --precision amp.")
+        precision = "amp"
+    logger.info(f"  Precision: {precision}")
+
     results = run_inference(
         model, val_loader, device,
         score_thresh=args.score_thresh,
-        use_amp=args.use_amp,
+        precision=precision,
     )
     logger.info(f"Total predictions: {len(results)}")
 
