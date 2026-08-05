@@ -1,5 +1,17 @@
 # Pre-campaign audit — RT-DETR KD
 
+> **Historical document — kept verbatim as evidence.** Written before the
+> campaign ran; statements about what *will* happen, open action items, and the
+> test count below describe the repo as of 2026-07-27. The campaign has since
+> completed. Current state: [`../README.md`](../README.md) (results) and
+> [`../CLAUDE.md`](../CLAUDE.md) (protocol). Condensed index:
+> [`README.md`](README.md).
+>
+> Two action items this document left open were closed by the campaign:
+> `--teacher-min-map` is now `0.10` in `scripts/run_ablation.sh` (the own R50
+> teacher scored 0.142), and P-3 was folded into the λ-calibration pass
+> (`tools/calibrate_lambda.py`).
+
 **Date:** 2026-07-27 · **revised** after proposal review (second batch: P-1, P-2, P-4, P-5 applied)
 **Scope:** everything that runs during the ~11 h full-COCO teacher training and the nine 27.5K-subset ablation runs.
 **Test suite:** `uv run pytest tests/ -q` → **85 passed, 2 skipped** (was 47 passed, 2 skipped before the audit; 38 regression tests in `tests/test_audit_regressions.py`).

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Run the Phase 2A ablation for the RT-DETR KD project (tech-report scope).
+# THE campaign script for the RT-DETR KD project (tech-report scope).
+# Every number reported in README.md was produced by this file.
+#   Phase 2A — runs 0-8, seed 42 (the single-seed exploration table).
+#   Phase 2B — runs 9/10 add the stage-adaptive lambda-swap 2x2, and the same
+#              script is re-invoked with SEED=43 / SEED=44 plus an ONLY_RUNS
+#              filter to repeat the four headline configurations (run00,
+#              run05, run06, and cosine at lambda=22.51 = run09).
+# Per-method lambda came in as environment overrides; the values used are
+# recorded in the lambda block below.
 #
-# Ablation grid — 9 runs + 1 optional:
+# Ablation grid — Phase 2A runs 0-8, Phase 2B runs 9-10:
 #   Run 0 : Baseline (no KD)
 #   Run 1 : Logit-KD, binary KL          (sigmoid-matched — default formulation)
 #   Run 2 : Logit-KD, softmax KL         (formulation ablation)
@@ -12,7 +20,9 @@
 #   Run 7 : Stage-Adaptive, cosine       (novel #2 — curriculum weighting)
 #   Run 8 : Stage-Adaptive, inverse_cosine (curriculum-DIRECTION control:
 #           if ≈ cosine, the curriculum claim does not hold — report honestly)
-#   Run 9 : MGD (optional extra literature baseline — commented out below)
+#   Run 9 : Stage-Adaptive, cosine   at LAM_STAGE_INVCOS  (lambda-swap 2x2)
+#   Run 10: Stage-Adaptive, invcos   at LAM_STAGE_COSINE  (lambda-swap 2x2)
+#   Run 11: MGD (optional extra literature baseline — commented out below)
 #
 # Model selection: per-epoch eval + best checkpoint use a selection split
 # carved FROM the training pool (tools/make_select_split.py); the val set is
@@ -68,7 +78,18 @@ SEED="${SEED:-42}"               # fixed per campaign; Phase 2B repeats
 # ~1e5x). Paste the calibrated values below; keep them here (visible) rather
 # than in YAML, where a key can silently override the CLI flag.
 #
-# >>> REPLACE THESE PLACEHOLDERS with the calibrate_lambda.py output <<<
+# The defaults below are placeholders (1.0). The campaign passed the calibrated
+# values as environment overrides; these are the values behind every number in
+# README.md, reproducible by re-running tools/calibrate_lambda.py against the
+# 0.142-mAP own R50 teacher at seed 42:
+#
+#   LAM_LOGIT_BINARY=24.23     LAM_LOGIT_SOFTMAX=5.317
+#   LAM_FEATURE=6.249          LAM_CWD=11.78
+#   LAM_QUERY_HUNGARIAN=3.518  LAM_QUERY_INDEX=3.577
+#   LAM_STAGE_COSINE=6.324     LAM_STAGE_INVCOS=22.51
+#
+# Runs 9/10 (the λ-swap 2×2) deliberately cross the last two — see their
+# comments below.
 LAM_LOGIT_BINARY="${LAM_LOGIT_BINARY:-1.0}"
 LAM_LOGIT_SOFTMAX="${LAM_LOGIT_SOFTMAX:-1.0}"
 LAM_FEATURE="${LAM_FEATURE:-1.0}"
@@ -230,7 +251,7 @@ run_experiment() {
 # `|| return $?`. Without those, a failed training run would fall through to
 # benchmarking and evaluating a checkpoint that does not exist.
 # ONLY_RUNS restricts execution to a subset of run ids, e.g.
-#   ONLY_RUNS="0 5 6 7 8"  (Phase 2B: baseline + the two contested pairs)
+#   ONLY_RUNS="0 5 6 9"  (Phase 2B seed repeats: the four headline configs)
 # Empty (default) runs everything. Selection happens here rather than by
 # commenting out lines, so every run still launches through the identical
 # run_experiment path — cross-run comparability is the whole point.
@@ -317,7 +338,6 @@ run_or_record 7 "stage_adaptive" "$LAM_STAGE_COSINE" "4" "run07_stage_adaptive_c
 run_or_record 8 "stage_adaptive" "$LAM_STAGE_INVCOS" "4" "run08_stage_adaptive_invcos" \
     "configs/kd/stage_adaptive_kd.yml" "--schedule inverse_cosine"
 
-# ---- Run 9 (OPTIONAL): MGD extra literature baseline ----
 # ---- Runs 9-10 (Phase 2B): lambda-swap controls for stage_adaptive --------
 # Calibration measured lambda at epoch 1, where cosine is feature-dominant
 # (large L_KD -> small lambda) and inverse_cosine is logit-dominant (small

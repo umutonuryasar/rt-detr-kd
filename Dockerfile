@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps in two layers so model-code changes don't bust the
-# expensive torch install layer.
+# expensive torch install layer. These two files mirror pyproject.toml, which
+# is authoritative — see their headers.
 COPY requirements.txt requirements-serve.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir -r requirements-serve.txt

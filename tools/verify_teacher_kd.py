@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Verify cross-architecture KD against a lyuwenyu/RT-DETR teacher.
 
-Run this once after downloading the canonical RT-DETR checkpoint and before
-launching Phase 2A on Colab. It catches dim/shape mismatch bugs early.
+STATUS: not superseded, but unused by this study. Every reported run distils
+from the own-architecture R50 teacher, so the cross-architecture path was never
+exercised (docs/AUDIT.md, "Not verifiable statically"). Nothing in
+scripts/, tests/ or CI invokes this script. It remains the preflight for the
+optional cross-architecture comparison: run it once after downloading the
+canonical RT-DETR checkpoint, before any run with TEACHER_SOURCE=lyuwenyu.
+It catches dim/shape mismatch bugs early.
 
 Steps:
   1. Build the simplified student (our RTDETR).

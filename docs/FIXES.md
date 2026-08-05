@@ -1,5 +1,13 @@
 # Fix Batch — Methodology & Correctness Revision (July 2026)
 
+> **Historical document — kept verbatim as evidence.** These fixes define the
+> formulations the campaign was run under (binary logit KL, prediction-space
+> Hungarian query matching, per-scale 2-D feature alignment, leakage-free
+> checkpoint selection). Follow-on work: [`TRAINER_FIXES.md`](TRAINER_FIXES.md)
+> then [`AUDIT.md`](AUDIT.md). Condensed index: [`README.md`](README.md).
+> Note: `requirements.txt` (§9) is now a mirror of `pyproject.toml`, which is
+> authoritative — see the root README's *Install* section.
+
 This batch addresses paper-facing methodology issues and training-correctness
 bugs identified in a full-repo review, applied *before* the Phase 2A ablation
 runs so results are produced under the corrected setup.

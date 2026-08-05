@@ -1,3 +1,7 @@
+# NOT AUTHORITATIVE. Mirrors pyproject.toml's [project.optional-dependencies]
+# `serve` extra (`uv sync --extra serve`), used only by the Dockerfile.
+# Deliberate difference: the image pins version floors and the uvicorn
+# `standard` extra, which the pyproject extra leaves unconstrained.
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9

@@ -1,13 +1,15 @@
 # RT-DETR Knowledge Distillation
 
-**Systematic knowledge distillation study for real-time detection transformers — a 9-run controlled ablation across 5 KD methods with 2 novel contributions, TensorRT INT8 edge deployment on a 4 GB GPU.**
+**Systematic knowledge distillation study for real-time detection transformers — an 11-configuration controlled ablation across 5 KD methods with 2 novel contributions, each tested against its own control, on a 4 GB GPU budget.**
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![CI](https://github.com/umutonuryasar/rt-detr-kd/actions/workflows/ci.yml/badge.svg)
 
-> **Status:** Phase 2A ablation in progress. Tech-report scope: results land in this README together with a 3-part blog series — findings are reported here, honestly, whichever way they go.
+> **Status:** the experimental campaign is **complete** — results below. Both novel methods were tested against their own controls and both claims failed; that is reported here as it happened. Remaining work is deployment (TensorRT sweep, demo) and the blog series.
+>
+> **Jump to:** [Results](#results) · [Findings](#findings) · [Limitations](#limitations) · [Reproducing these numbers](#reproducing-these-numbers) · [Process record](docs/README.md)
 
 ---
 
@@ -19,7 +21,9 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 ## What I Built
 
-- **9-run ablation:** baseline, Logit-KD (binary vs. softmax formulation), Feature-KD, CWD (ICCV'21), Query-KD (Hungarian vs. index matching), and Stage-Adaptive KD (cosine vs. inverse-cosine curriculum-direction control) — every claim ships with its own control run
+- **11-configuration ablation:** baseline, Logit-KD (binary vs. softmax formulation), Feature-KD, CWD (ICCV'21), Query-KD (Hungarian vs. index matching), and Stage-Adaptive KD (cosine vs. inverse-cosine curriculum-direction control), plus a λ-swap 2×2 that separates schedule direction from schedule weight — every claim ships with its own control run
+- **Per-method λ calibration** (`tools/calibrate_lambda.py`) — raw KD-term magnitudes span ~1e5× across methods, so a shared λ=1.0 would have compared methods at wildly different effective strengths; λ is set per method by matching the KD term to detection-loss scale at initialization
+- **Seed repeats on the four headline configurations** (42/43/44), so the reported differences can be read against a measured within-configuration spread rather than assumed to be signal
 - **Leakage-free model selection** — best checkpoints are chosen on a 2.5K selection split carved *from the training pool* (`tools/make_select_split.py`); the reported val set is evaluated once per run and never drives checkpoint selection
 - **Feature-KD** with encoder MSE + decoder cross-attention cosine alignment, projecting student features to teacher channel width; multi-scale sequences are aligned **per scale in 2-D**, never blended across scale boundaries
 - **CWD** (Shu et al., ICCV'21) — channel-wise softmax KL baseline for fair literature comparison
@@ -168,6 +172,75 @@ with the training loss falling in both cases. All runs pin `--lr-head 1e-4
 --lr-backbone 1e-5`. The failure mode is worth naming — a falling loss alongside
 a collapsed mAP, with every predicted class probability stuck below 0.12.
 
+**Correctness work behind these numbers.** Four defects were fixed before any
+campaign checkpoint existed, each of which produces a plausible training log and
+a wrong result: data order seeded from the global RNG rather than from `--seed`
+(so the runs would have trained on different data), resume restarting the LR
+schedule from iteration 0, CWD's loss inflated 256×, and the LR collapse above.
+The full record, with fails-before evidence and regression tests, is in
+[`docs/`](docs/README.md).
+
+---
+
+## Reproducing these numbers
+
+Everything reported above came out of `scripts/run_ablation.sh`. Each row maps
+to one run directory, one config and one λ:
+
+| Table row | Run | Tag | Config | λ | Flag |
+|---|---|---|---|---|---|
+| Baseline | 0 | `run00_baseline` | — | — | `--kd-type none` |
+| Logit-KD, binary KL | 1 | `run01_logit_binary_t4` | — | 24.23 | `--logit-mode binary` |
+| Logit-KD, softmax KL | 2 | `run02_logit_softmax_t4` | — | 5.317 | `--logit-mode softmax` |
+| Feature-KD | 3 | `run03_feature` | — | 6.249 | — |
+| CWD | 4 | `run04_cwd` | `configs/kd/cwd_kd.yml` | 11.78 | — |
+| Query-KD, Hungarian | 5 | `run05_query_hungarian` | `configs/kd/query_kd.yml` | 3.518 | `--query-matching hungarian` |
+| Query-KD, index | 6 | `run06_query_index` | `configs/kd/query_kd.yml` | 3.577 | `--query-matching index` |
+| Stage-Adaptive, cosine | 7 | `run07_stage_adaptive_cosine` | `configs/kd/stage_adaptive_kd.yml` | 6.324 | `--schedule cosine` |
+| Stage-Adaptive, inverse-cosine | 8 | `run08_stage_adaptive_invcos` | `configs/kd/stage_adaptive_kd.yml` | 22.51 | `--schedule inverse_cosine` |
+| **2×2: cosine @ λ=22.51** | 9 | `run09_stage_cosine_lam22` | `configs/kd/stage_adaptive_kd.yml` | 22.51 | `--schedule cosine` |
+| 2×2: inverse-cosine @ λ=6.324 | 10 | `run10_stage_invcos_lam6` | `configs/kd/stage_adaptive_kd.yml` | 6.324 | `--schedule inverse_cosine` |
+
+T=4 throughout. The headline n=3 table is runs 0, 5, 6 and 9 repeated at seeds
+43 and 44 via `SEED=` and `ONLY_RUNS=`; every other row is a single seed-42 run.
+
+```bash
+# One-time: carve the 2.5K selection split from the training pool (seed 42).
+uv run python tools/make_select_split.py \
+    --ann ~/data/coco/annotations/instances_train2017_30k.json \
+    --num-select 2500 --seed 42
+
+# Re-measure λ against the teacher checkpoint (prints the values in the table).
+uv run python tools/calibrate_lambda.py \
+    --teacher-weights weights/teacher_r50.pth \
+    --coco-train ~/data/coco/train2017_30k \
+    --train-ann  ~/data/coco/annotations/instances_train2017_30k_train.json \
+    --seed 42
+
+# Phase 2A — runs 0-8 at seed 42.
+LAM_LOGIT_BINARY=24.23 LAM_LOGIT_SOFTMAX=5.317 \
+LAM_FEATURE=6.249 LAM_CWD=11.78 \
+LAM_QUERY_HUNGARIAN=3.518 LAM_QUERY_INDEX=3.577 \
+LAM_STAGE_COSINE=6.324 LAM_STAGE_INVCOS=22.51 \
+TEACHER_WEIGHTS=weights/teacher_r50.pth \
+BATCH_SIZE=16 \
+bash scripts/run_ablation.sh ~/data/coco runs
+
+# Phase 2B — seed repeats of the four headline configurations.
+SEED=43 ONLY_RUNS="0 5 6 9" ... bash scripts/run_ablation.sh ~/data/coco runs_seed43
+```
+
+`LR_HEAD`/`LR_BACKBONE` default to the pinned `1e-4`/`1e-5` inside the script;
+the λ variables default to placeholder `1.0` and must be passed. The teacher is
+the same script's model config trained with `--kd-type none` on full COCO.
+
+> **Gap — the orchestration notebooks are not committed.** The teacher run and
+> the ablation were driven from two Colab notebooks that exist only in the
+> author's Drive; `notebooks/colab_training.ipynb` predates them and describes
+> the superseded 23-run plan. `runs/` is gitignored, so no campaign `eval.log`
+> is in version control either. The chain from a reported number to its script,
+> config and λ is complete; the chain to the exact cell that launched it is not.
+
 ---
 
 ## Architecture
@@ -178,7 +251,7 @@ The main ablation pairs the simplified student with an **own-architecture R50 te
 
 | Role | Backbone | Source | Params | mAP@\[.5:.95\] |
 |------|----------|--------|--------|---------------|
-| Student (simplified, this repo) | ResNet-18 | trained here | 15.9M | TBD |
+| Student (simplified, this repo) | ResNet-18 | trained here | 15.9M | 0.0388 no-KD → 0.0676 best KD |
 | Teacher (own, main ablation) | ResNet-50 | trained here | 28.9M | 0.142 |
 | Teacher RT-DETR-M (cross-arch option) | ResNet-34 | lyuwenyu/RT-DETR | 25M | 51.3 |
 | Teacher RT-DETR-L (cross-arch option) | ResNet-50 | lyuwenyu/RT-DETR | 32M | 53.1 |
@@ -202,11 +275,18 @@ Ablation runs execute on a Colab A100; the RTX 3050 hosts smoke tests and the Te
 
 ## Quickstart
 
+Dependencies are managed with [`uv`](https://docs.astral.sh/uv/) —
+`pyproject.toml` + `uv.lock` are authoritative and Python is pinned by
+`.python-version`. The `requirements*.txt` files are non-authoritative mirrors
+kept only so the Dockerfile can cache its install layers.
+
 ```bash
 # Clone with canonical teacher submodule
 git clone --recurse-submodules https://github.com/umutonuryasar/rt-detr-kd
 cd rt-detr-kd
-pip install -r requirements.txt
+uv sync                      # runtime + CUDA-pinned torch, from uv.lock
+uv sync --extra serve        # add the FastAPI server deps
+uv run pytest tests/ -q      # 86 passed, 2 skipped
 
 # Run inference server (Docker)
 docker pull ghcr.io/umutonuryasar/rt-detr-kd:latest
@@ -226,14 +306,20 @@ curl -X POST http://localhost:8000/detect \
 
 ```
 rt-detr-kd/
-├── configs/          # YAML configs: student, teacher, all 5 KD methods
-│   └── kd/           # Active KD configs (cwd, query, stage_adaptive)
+├── README.md         # this file — the deliverable
+├── CLAUDE.md         # current protocol, decisions and status
+├── docs/             # process record: AUDIT, FIXES, TRAINER_FIXES, TECH_REPORT_PLAN
+│                     # start at docs/README.md
+├── configs/          # YAML configs: student, teacher, KD methods
+│   └── kd/           # cwd, query, stage_adaptive (+ archive/ — unused variants)
 ├── src/              # Core library: models, distillation losses, data, trainer
-├── tools/            # train_kd, eval, benchmark_fps, export_trt, serve,
-│                     # aggregate_results, make_select_split
+├── tools/            # train_kd, eval, benchmark_fps, export_trt, calibrate_lambda,
+│                     # aggregate_results, make_select_split, verify_teacher_kd
 ├── tests/            # pytest suite incl. methodology regression tests — runs on every push
-├── scripts/          # run_ablation.sh (9-run Phase 2A); run_final.sh (full-COCO — out of current scope)
-├── notebooks/        # ablation_analysis, visualize_attention, colab_training
+├── scripts/          # run_ablation.sh — THE campaign script, every reported number;
+│                     # run_final.sh — full-COCO sketch, NOT part of this study, never run
+├── notebooks/        # ablation_analysis, visualize_attention, colab_training (all stale)
+├── serve/            # FastAPI inference server
 ├── third_party/      # lyuwenyu/RT-DETR submodule — canonical teacher weights + config
 └── .github/          # CI: pytest on push
 ```
@@ -302,7 +388,8 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 
 **Done**
 - [x] Full distillation pipeline — 5 KD methods, unified loss wrapper, config-driven
-- [x] Methodology fix batch — prediction-space Hungarian query matching, sigmoid-matched binary logit KL, per-scale 2-D feature alignment, mosaic single-normalization, leakage-free checkpoint selection (see `FIXES.md`)
+- [x] Methodology fix batch — prediction-space Hungarian query matching, sigmoid-matched binary logit KL, per-scale 2-D feature alignment, mosaic single-normalization, leakage-free checkpoint selection (see [`docs/FIXES.md`](docs/FIXES.md))
+- [x] Pre-campaign audit — every P0/P1 finding fixed and regression-tested (see [`docs/AUDIT.md`](docs/AUDIT.md))
 - [x] Cross-architecture teacher adapter with mAP sanity gate
 - [x] TensorRT FP32 / FP16 / INT8 export with entropy calibration (`tools/export_trt.py`)
 - [x] FastAPI inference server with single-image and batch endpoints
@@ -310,19 +397,22 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 - [x] Automated results aggregation — CSV + Markdown (`tools/aggregate_results.py`)
 - [x] CI test suite: pytest incl. methodology regression tests on every push (CPU-only)
 
-**In progress**
-- [ ] Own R50 teacher training (single run; reused across all ablation runs)
-- [ ] Phase 2A ablation — 9 runs on COCO 30K subset, 36 epochs, seed 42
-- [ ] Attention visualization notebook (teacher vs. student cross-attention maps)
+- [x] Own R50 teacher training — full COCO, 36 epochs, A100; 0.142 mAP
+- [x] Per-method λ calibration (`tools/calibrate_lambda.py`)
+- [x] Phase 2A ablation — runs 0–8 on COCO 30K subset, 36 epochs, seed 42
+- [x] Phase 2B — λ-swap 2×2 (runs 9–10) and seed repeats at 43/44
+- [x] Results, Findings and Limitations in this README
 
-**Next**
-- [ ] Results, Findings, and Limitations sections in this README
+**Next — Phase 3**
+- [ ] Commit the two Colab notebooks that drove the teacher run and the ablation
 - [ ] TensorRT FP16/INT8 latency-vs-accuracy sweep on the best checkpoint
+- [ ] FPS benchmarking on the RTX 3050
+- [ ] Refresh the attention-visualization notebook against the campaign run tags
 - [ ] Hugging Face Spaces demo with the best checkpoint
 - [ ] 3-part blog series on the methodology findings
 
 **Deliberately out of scope**
-- Full-COCO 118K multi-seed runs and a standalone paper — the single-seed, subset-scale tech-report format keeps the claims proportionate to the compute behind them.
+- Full-COCO 118K multi-seed runs and a standalone paper — the subset-scale tech-report format keeps the claims proportionate to the compute behind them. `scripts/run_final.sh` sketches that plan, was never run, and produced no number in this README.
 
 ---
 

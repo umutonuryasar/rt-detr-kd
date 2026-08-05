@@ -1,3 +1,8 @@
+# NOT AUTHORITATIVE. pyproject.toml + uv.lock define this project's
+# dependencies; `uv sync` is the supported install. This file mirrors
+# pyproject.toml's [project].dependencies verbatim and exists only so the
+# Dockerfile can install runtime deps in a cached layer without a build
+# backend. Edit pyproject.toml first, then mirror the change here.
 torch>=2.1.0
 torchvision>=0.16.0
 pycocotools

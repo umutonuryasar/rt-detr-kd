@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  OUT OF CURRENT SCOPE — NOT PART OF THE CAMPAIGN. DO NOT RUN.
+#  NOT PART OF THIS STUDY. NEVER RUN. PRODUCED NO REPORTED NUMBER.
 # ============================================================================
 #
-# This script implements the SUPERSEDED full-COCO plan (Phase 2D/2E: 72 epochs,
-# 3 seeds, run05/run08/run14/run16/run17 numbering). That plan was cut in the
-# July 2026 scope decision — see TECH_REPORT_PLAN.md and CLAUDE.md.
+# No result in README.md came from this file. It was never executed; it is a
+# sketch of the SUPERSEDED full-COCO plan (Phase 2D/2E: 72 epochs, 3 seeds,
+# run05/run08/run14/run16/run17 numbering, lambda=1.0 for every method). That
+# plan was cut in the July 2026 scope decision — see docs/TECH_REPORT_PLAN.md
+# and CLAUDE.md. It is retained only as a starting point if the project is ever
+# extended to full COCO.
 #
-# The campaign is:
-#   scripts/run_ablation.sh   — 9 runs, COCO 30K subset, 36 epochs, seed 42
+# The campaign script is:
+#   scripts/run_ablation.sh   — Phase 2A runs 0-8 + Phase 2B runs 9-10,
+#                               COCO 30K subset, 36 epochs, calibrated lambda
 #
 # The run ids below no longer exist. Anything here is a starting point ONLY if
 # the project is later extended to full COCO; it has not been re-audited and
