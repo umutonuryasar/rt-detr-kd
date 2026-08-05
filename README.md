@@ -34,22 +34,139 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 
 ## Results
 
-> Ablation training in progress. Table will be populated after Phase 2A.
+All numbers are mAP@[.5:.95] on COCO val2017. Checkpoints are selected on a
+2,500-image split carved from the training pool; val2017 is evaluated once per
+run and never influences selection.
 
-| # | Method | mAP@\[.5:.95\] | ΔmAP | FPS (RTX 3050) | Params |
-|---|--------|---------------|------|----------------|--------|
-| 0 | Baseline (no KD) | — | — | — | 15.9M |
-| 1 | Logit-KD, binary KL (λ=1.0, T=4) | — | — | — | 15.9M |
-| 2 | Logit-KD, softmax KL *(formulation ablation)* | — | — | — | 15.9M |
-| 3 | Feature-KD (enc + attn) | — | — | — | 15.9M |
-| 4 | CWD — Shu et al. ICCV'21 | — | — | — | 15.9M |
-| 5 | **Query-KD, Hungarian** *(novel)* | — | — | — | 15.9M |
-| 6 | Query-KD, index *(matching ablation)* | — | — | — | 15.9M |
-| 7 | **Stage-Adaptive, cosine** *(novel)* | — | — | — | 15.9M |
-| 8 | Stage-Adaptive, inverse-cosine *(direction control)* | — | — | — | 15.9M |
-| — | Teacher (own R50, trained in this repo) | 0.142 | ref | — | 28.9M |
+### Headline: three seeds
 
-**Protocol:** COCO 30K subset (27.5K train / 2.5K selection split), 36 epochs, 512 px, fixed seed 42, identical teacher weights across all runs. Checkpoint selection uses the selection split; val2017 is touched once per run. Single seed — differences are reported as-is, without statistical-significance claims.
+These four configurations were repeated at seeds 42/43/44. The spread within a
+configuration is what makes the differences between them interpretable.
+
+| Configuration | mAP (mean ± std, n=3) | Δ baseline |
+|---|---|---|
+| Baseline (no KD) | 0.0388 ± 0.0028 | — |
+| Query-KD, Hungarian matching *(novel)* | 0.0377 ± 0.0007 | −0.0011 |
+| Query-KD, index truncation *(control)* | 0.0448 ± 0.0010 | +0.0060 |
+| **Stage-Adaptive, cosine, λ=22.51** | **0.0676 ± 0.0005** | **+0.0288 (+74%)** |
+| Teacher (own R50) | 0.142 | reference |
+
+### Single-seed exploration (seed 42)
+
+The remaining configurations were run once. Differences among them are of the
+same order as the baseline's seed-to-seed spread (±0.0028), so they are
+reported as observations, not as a ranking.
+
+| Configuration | λ | mAP (n=1) |
+|---|---|---|
+| Baseline (no KD) | — | 0.0419 |
+| Logit-KD, binary KL | 24.23 | 0.0348 |
+| Logit-KD, softmax KL | 5.317 | 0.0374 |
+| Feature-KD (encoder + attention) | 6.249 | 0.0464 |
+| CWD — Shu et al. ICCV'21 | 11.78 | 0.0442 |
+| Stage-Adaptive, cosine | 6.324 | 0.0553 |
+| Stage-Adaptive, inverse-cosine | 22.51 | 0.0657 |
+
+### The λ 2×2
+
+Calibration set λ per method by matching the KD term to the detection loss at
+initialization. For a schedule-based method that measurement is taken at the
+epoch-1 mixture, which differs between the two schedule directions — so cosine
+and inverse-cosine received very different λ. Crossing them isolates the
+schedule direction from the weight:
+
+| | λ=6.324 | λ=22.51 |
+|---|---|---|
+| **cosine** | 0.0553 | **0.0672** |
+| **inverse-cosine** | 0.0430 | 0.0657 |
+
+Raising λ helps in both directions (+0.012 and +0.023). At matched λ the
+direction effect is ~0.001, i.e. nothing.
+
+---
+
+## Findings
+
+**1. Query matching did not help; index truncation beat it.** Query-KD was
+built on the argument that decoder queries have no canonical ordering, so
+student and teacher queries must be matched (Hungarian, in prediction space)
+rather than paired by index. The control says otherwise: index truncation wins
+by +0.0071 at n=3, with within-configuration spread of ±0.001, and the same
+ordering holds in every seed. Hungarian matching also lands *below* the
+baseline — worse than not distilling at all.
+
+A plausible mechanism is target instability: the assignment is recomputed every
+step, so early in training a given student query chases a different teacher
+query from batch to batch. Index pairing is arbitrary but stationary.
+
+Scope: this holds for a **same-architecture teacher with an equal query count**.
+The original argument for matching concerned cross-architecture distillation and
+a 100-vs-300 query mismatch, which this setup does not test.
+
+**2. λ dominates schedule design.** The first-pass result — inverse-cosine
+beating cosine — did not survive its own control. It was a λ artifact: at
+matched λ the two schedules are within 0.001 of each other, while the λ
+difference is worth 0.012–0.023. The curriculum-direction claim is not
+supported.
+
+**3. Calibrating λ by a uniform rule is not the same as calibrating it
+fairly.** The rule here (match the KD term to detection-loss scale at
+initialization) is applied identically to every method, yet it systematically
+under-weights schedule-based methods, because their epoch-1 mixture is not
+representative of the loss they actually train under. The best result in this
+study came from a *control* run that crossed the calibrated λ values, not from
+the calibrated configuration itself.
+
+**4. Logit-KD hurt in both formulations.** Binary KL (0.0348) and softmax KL
+(0.0374) both landed below the seed-42 baseline (0.0419). The premise that
+sigmoid-matched binary KL should outperform categorical softmax KL — because
+RT-DETR trains classification with sigmoid focal loss — is not supported here;
+if anything the ordering is reversed. Single seed, so the ordering between the
+two is not itself a claim.
+
+**5. KD reduced run-to-run variance.** Baseline: ±0.0028. Every KD
+configuration measured at n=3: ±0.0005 to ±0.0010. The effect is independent of
+whether the configuration improved mean mAP.
+
+---
+
+## Limitations
+
+- **λ was not swept per method.** The 2×2 above varies λ only within
+  Stage-Adaptive. Feature-KD, CWD and the others were each run at a single
+  calibrated λ. Since λ turned out to matter more than the method-design
+  choices under test, the correct reading of the headline number is *the best
+  configuration found*, not *Stage-Adaptive is the best method* — other methods
+  may well close the gap at a higher λ.
+- **One teacher.** All runs distil from the same R50 checkpoint (0.142 mAP).
+  Whether these orderings hold under a stronger teacher is untested.
+- **Weak absolute regime.** A 15.9M student on a 30K subset at 512 px reaches
+  ~0.04–0.07 mAP. Conclusions are about relative behaviour in this regime, not
+  about production-grade detection.
+- **Three seeds.** Enough to separate a 0.007 difference from a 0.001 spread;
+  not enough for a distributional claim.
+- **Five of eleven configurations are single-seed** and are reported as
+  observations only.
+- **Resumed runs are not bit-exact reproducible** — DataLoader shuffle RNG state
+  is not restored across a resume. Uninterrupted runs at a fixed seed are
+  reproducible.
+
+---
+
+## Methodology notes
+
+**λ calibration.** `tools/calibrate_lambda.py` measures median(L_det) /
+median(L_KD) over 20 batches at initialization and sets λ per method so every KD
+term starts at detection-loss scale. Values used (teacher = own R50 @ 0.142,
+seed 42): logit_binary 24.23, logit_softmax 5.317, feature 6.249, cwd 11.78,
+query_hungarian 3.518, query_index 3.577, stage_cosine 6.324, stage_invcos
+22.51. Re-running the script with the same arguments reproduces these.
+
+**Learning rate.** `train_kd.py` defaults to `lr_head=1e-3`, which collapses
+this architecture: the teacher reached 0.027 mAP at 1e-3 versus 0.142 at 1e-4,
+with the training loss falling in both cases. All runs pin `--lr-head 1e-4
+--lr-backbone 1e-5`. The failure mode is worth naming — a falling loss alongside
+a collapsed mAP, with every predicted class probability stuck below 0.12.
 
 ---
 
