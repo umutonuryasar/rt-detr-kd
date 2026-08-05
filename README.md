@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![CI](https://github.com/umutonuryasar/rt-detr-kd/actions/workflows/ci.yml/badge.svg)
 
-> **Status:** the experimental campaign is **complete** — results below. Both novel methods were tested against their own controls and both claims failed; that is reported here as it happened. Remaining work is deployment (TensorRT sweep, demo) and the blog series.
+> **Status:** the experimental campaign is **complete** — results below. Both novel methods were tested against their own controls and both claims failed; that is reported here as it happened. Deployment latency is measured (see Deployment); remaining work is the demo and the blog series.
 >
 > **Jump to:** [Results](#results) · [Findings](#findings) · [Limitations](#limitations) · [Reproducing these numbers](#reproducing-these-numbers) · [Process record](docs/README.md)
 
@@ -15,7 +15,7 @@
 
 ## Motivation
 
-RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNet-50 backbone is ill-suited to edge hardware: a direct swap to ResNet-18 (15.9M params in this student) costs several mAP points with no principled recovery strategy. Knowledge distillation transfers structural and semantic signal from a frozen teacher to a lightweight student, but most KD literature targets CNN detectors — it is unclear how logit-level versus feature-level versus query-level distillation interact with the transformer encoder-decoder architecture that RT-DETR uses. This work runs a controlled ablation across five KD methods on a fixed 4 GB RTX 3050 budget, introduces two transformer-specific techniques (Query-KD and Stage-Adaptive KD), and carries the best configuration through TensorRT INT8 quantization to a deployable FastAPI server.
+RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNet-50 backbone is ill-suited to edge hardware: a direct swap to ResNet-18 (15.9M params in this student) costs several mAP points with no principled recovery strategy. Knowledge distillation transfers structural and semantic signal from a frozen teacher to a lightweight student, but most KD literature targets CNN detectors — it is unclear how logit-level versus feature-level versus query-level distillation interact with the transformer encoder-decoder architecture that RT-DETR uses. This work runs a controlled ablation across five KD methods on a fixed 4 GB RTX 3050 budget, introduces two transformer-specific techniques (Query-KD and Stage-Adaptive KD), and measures what the best configuration costs to serve on that same consumer GPU.
 
 ---
 
@@ -30,7 +30,7 @@ RT-DETR achieves state-of-the-art detection accuracy but its 32M-parameter ResNe
 - **Query-KD** *(novel)* — distils RT-DETR's decoder object queries directly via per-image bipartite matching in prediction space (which object does each query describe?); robust to the 100 vs. 300 query-count mismatch. Legacy index-wise truncation is kept as an ablation baseline
 - **Stage-Adaptive KD** *(novel)* — cosine curriculum that shifts weight from feature distillation (structural alignment, early training) to logit distillation (semantic refinement, late training), trained against an inverse-schedule control
 - **Cross-architecture teacher adapter** (`src/models/rtdetr_teacher.py`) loading canonical [lyuwenyu/RT-DETR](https://github.com/lyuwenyu/RT-DETR) weights with a mAP sanity gate at training start
-- **TensorRT INT8 export** with entropy calibration, FP32/FP16/INT8 latency sweep, and a latency-vs-accuracy table (`tools/export_trt.py`)
+- **Precision sweep on the deployment GPU** — mAP, FPS, latency and peak VRAM measured in fp32/AMP/fp16 in matching numerical modes (`tools/eval.py --precision`, `tools/benchmark_fps.py`). A TensorRT export path exists (`tools/export_trt.py`) but was not exercised — see Deployment.
 - **FastAPI inference server** for single-image and batch detection endpoints
 - **Automated results aggregation** (`tools/aggregate_results.py`) producing CSV + Markdown tables
 
@@ -250,6 +250,45 @@ chain from a reported number to the cell that launched it is complete.
 
 ---
 
+## Deployment
+
+Measured on the laptop RTX 3050 (4 GB) that the whole study was budgeted
+around, using the seed-42 checkpoint of the best configuration
+(`run09_stage_cosine_lam22`). 500 iterations after 50 warmup, batch size 1,
+512×512 — the resolution the model was trained and evaluated at.
+
+Accuracy and latency are measured in **matching numerical modes**: an mAP taken
+under autocast paired with a latency taken in pure fp32 would describe two
+different models.
+
+| Precision | mAP@[.5:.95] | FPS | Latency | Peak VRAM |
+|---|---|---|---|---|
+| fp32 | 0.0672 | 95.6 ± 1.7 | 10.46 ms | 111.3 MB |
+| AMP (autocast) — the campaign's mode | 0.0671 | — | — | — |
+| **fp16** | **0.0672** | **160.8 ± 2.5** | **6.22 ms** | **64.0 MB** |
+
+**fp16 is free for this model**: 1.68× throughput and 42% lower peak memory at
+no measurable accuracy cost. The AMP row carries no latency because the
+benchmark measures pure fp32 and pure fp16 only; it is listed because every
+number in the Results section was produced under autocast, and reproducing them
+requires that mode.
+
+One caveat against over-reading the fp16 result: this student reaches 0.067
+mAP, so there is not much precision-sensitive signal left to lose. *fp16 is
+lossless for this model* is supported; *fp16 is generally lossless* is not.
+
+The whole model serves in 64 MB — the efficiency claim this project was built
+to test, end to end on consumer hardware.
+
+**TensorRT was not run.** `tools/export_trt.py` implements ONNX export and
+FP32/FP16/INT8 engine building with entropy calibration, but no engine was
+built and no INT8 number appears here. At 161 FPS and 64 MB the marginal gain
+did not justify the toolchain risk, and INT8 quantization would most plausibly
+cost small-object accuracy, which is already the weakest axis (AP-small 0.021).
+It is listed as future work rather than quietly implied.
+
+---
+
 ## Architecture
 
 ### Student vs. teacher
@@ -399,7 +438,7 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 - [x] Methodology fix batch — prediction-space Hungarian query matching, sigmoid-matched binary logit KL, per-scale 2-D feature alignment, mosaic single-normalization, leakage-free checkpoint selection (see [`docs/FIXES.md`](docs/FIXES.md))
 - [x] Pre-campaign audit — every P0/P1 finding fixed and regression-tested (see [`docs/AUDIT.md`](docs/AUDIT.md))
 - [x] Cross-architecture teacher adapter with mAP sanity gate
-- [x] TensorRT FP32 / FP16 / INT8 export with entropy calibration (`tools/export_trt.py`)
+- [x] TensorRT export path implemented (`tools/export_trt.py`) — code only, never run; see Deployment
 - [x] FastAPI inference server with single-image and batch endpoints
 - [x] DETR-style top-k decoding (fixes ~2 mAP vs. per-query argmax)
 - [x] Automated results aggregation — CSV + Markdown (`tools/aggregate_results.py`)
@@ -412,12 +451,17 @@ where $e$ is the current epoch and $E$ is total epochs. The schedule shape (cosi
 - [x] Results, Findings and Limitations in this README
 - [x] Campaign notebooks committed — teacher run and ablation reproducible end to end
 
-**Next — Phase 3**
-- [ ] TensorRT FP16/INT8 latency-vs-accuracy sweep on the best checkpoint
-- [ ] FPS benchmarking on the RTX 3050
+- [x] Precision sweep on the RTX 3050 — mAP, FPS, latency and VRAM in fp32/AMP/fp16 (see Deployment)
+- [x] fp16 inference fix — positional embeddings honour the token dtype; the fp32 path is bit-identical, so no reported number moved
+
+**Next**
 - [ ] Refresh the attention-visualization notebook against the campaign run tags
 - [ ] Hugging Face Spaces demo with the best checkpoint
 - [ ] 3-part blog series on the methodology findings
+
+**Future work, not attempted**
+- TensorRT engine building and an INT8 latency-vs-accuracy sweep. The export
+  code exists; the engines do not.
 
 **Deliberately out of scope**
 - Full-COCO 118K multi-seed runs and a standalone paper — the subset-scale tech-report format keeps the claims proportionate to the compute behind them. `scripts/run_final.sh` sketches that plan, was never run, and produced no number in this README.
