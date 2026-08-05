@@ -123,8 +123,21 @@ class TransformerEncoderLayer(nn.Module):
 # Sinusoidal positional encoding for 2-D feature maps
 # ---------------------------------------------------------------------------
 
-def build_2d_sincos_pos_embed(h: int, w: int, d_model: int, device=None) -> torch.Tensor:
+def build_2d_sincos_pos_embed(h: int, w: int, d_model: int, device=None,
+                              dtype=None) -> torch.Tensor:
     """Build 2-D sinusoidal positional encodings.
+
+    Args:
+        h, w:    Spatial dimensions of the feature map.
+        d_model: Channel dimension (must be divisible by 4).
+        device:  Device for the returned tensor.
+        dtype:   Dtype for the returned tensor. The sin/cos terms are always
+                 computed in float32 for numerical accuracy, then cast — pass
+                 the dtype of the tokens this embedding is added to. Leaving
+                 this None returns float32, which silently promotes half-
+                 precision tokens back to float32 and breaks fp16 inference
+                 (LayerNorm then sees float32 activations against half
+                 weights).
 
     Returns tensor of shape [1, h*w, d_model].
     """
@@ -145,7 +158,10 @@ def build_2d_sincos_pos_embed(h: int, w: int, d_model: int, device=None) -> torc
     pos_embed = torch.cat(
         [out_y.sin(), out_y.cos(), out_x.sin(), out_x.cos()], dim=1
     )  # [h*w, d_model]
-    return pos_embed.unsqueeze(0)  # [1, h*w, d_model]
+    pos_embed = pos_embed.unsqueeze(0)  # [1, h*w, d_model]
+    if dtype is not None:
+        pos_embed = pos_embed.to(dtype=dtype)
+    return pos_embed
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +259,8 @@ class HybridEncoder(nn.Module):
 
         # --- AIFI: Transformer encoder on C5 only (400 tokens at 640x640) ---
         B, D, H5, W5 = c5.shape
-        pos5 = build_2d_sincos_pos_embed(H5, W5, D, device=c5.device)  # [1, H5*W5, D]
+        pos5 = build_2d_sincos_pos_embed(H5, W5, D, device=c5.device,
+                                         dtype=c5.dtype)  # [1, H5*W5, D]
         tokens5 = c5.flatten(2).permute(0, 2, 1) + pos5               # [B, H5*W5, D]
         for layer in self.encoder_layers:
             tokens5 = layer(tokens5)
@@ -272,6 +289,7 @@ class HybridEncoder(nn.Module):
         for feat in feature_maps:
             B, C, H, W = feat.shape
             tokens = feat.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
-            pos = build_2d_sincos_pos_embed(H, W, C, device=feat.device)  # [1, H*W, C]
+            pos = build_2d_sincos_pos_embed(H, W, C, device=feat.device,
+                                            dtype=feat.dtype)  # [1, H*W, C]
             parts.append(tokens + pos)
         return torch.cat(parts, dim=1)  # [B, N_total, D]

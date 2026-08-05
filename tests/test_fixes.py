@@ -271,3 +271,46 @@ def test_decoder_capture_attn_on_stores_maps():
     _ = dec(memory)
     maps = dec.get_attn_maps_tensor()
     assert maps is not None and maps.shape == (2, 2, 2, 6, 10)
+
+
+# ---------------------------------------------------------------------------
+# 6. fp16 inference: positional embeddings must follow the token dtype
+# ---------------------------------------------------------------------------
+
+def test_pos_embed_respects_requested_dtype():
+    """A hardcoded float32 pos embed silently promotes half tokens back to
+    float32, so LayerNorm then sees float32 activations against half weights
+    and fp16 inference dies. The embedding must honour the requested dtype."""
+    from src.models.encoder import build_2d_sincos_pos_embed
+
+    for dt in (torch.float32, torch.float16):
+        pe = build_2d_sincos_pos_embed(4, 4, 64, dtype=dt)
+        assert pe.dtype == dt
+
+
+def test_pos_embed_fp32_path_unchanged():
+    """The dtype argument must not perturb fp32 values — every reported number
+    was produced on this path."""
+    from src.models.encoder import build_2d_sincos_pos_embed
+
+    implicit = build_2d_sincos_pos_embed(8, 6, 64)
+    explicit = build_2d_sincos_pos_embed(8, 6, 64, dtype=torch.float32)
+    assert implicit.dtype == torch.float32
+    assert torch.equal(implicit, explicit)
+
+
+def test_model_forward_in_half_precision():
+    """End-to-end guard for `--fp16` in tools/benchmark_fps.py."""
+    from src.models.rtdetr import RTDETR
+
+    model = RTDETR(
+        backbone_name="resnet18", num_classes=80, num_queries=10,
+        num_decoder_layers=2, hidden_dim=64, nhead=2, dim_feedforward=64,
+        pretrained_backbone=False, capture_attn=False,
+    ).eval().half()
+
+    with torch.no_grad():
+        out = model(torch.zeros(1, 3, 128, 128, dtype=torch.float16))
+
+    assert out["pred_logits"].dtype == torch.float16
+    assert out["pred_boxes"].dtype == torch.float16
