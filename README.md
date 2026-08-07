@@ -7,8 +7,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![CI](https://github.com/umutonuryasar/rt-detr-kd/actions/workflows/ci.yml/badge.svg)
 
-> **Status:** the experimental campaign is **complete** — results below. Both novel methods were tested against their own controls and both claims failed; that is reported here as it happened. Deployment latency is measured (see Deployment); remaining work is the demo and the blog series.
->
+> **Status: Complete** · Tech report · v1.0
 > **Jump to:** [Results](#results) · [Findings](#findings) · [Limitations](#limitations) · [Reproducing these numbers](#reproducing-these-numbers) · [Process record](docs/README.md)
 
 ---
@@ -136,24 +135,26 @@ whether the configuration improved mean mAP.
 
 ## Limitations
 
-- **λ was not swept per method.** The 2×2 above varies λ only within
-  Stage-Adaptive. Feature-KD, CWD and the others were each run at a single
-  calibrated λ. Since λ turned out to matter more than the method-design
-  choices under test, the correct reading of the headline number is *the best
-  configuration found*, not *Stage-Adaptive is the best method* — other methods
-  may well close the gap at a higher λ.
-- **One teacher.** All runs distil from the same R50 checkpoint (0.142 mAP).
-  Whether these orderings hold under a stronger teacher is untested.
-- **Weak absolute regime.** A 15.9M student on a 30K subset at 512 px reaches
-  ~0.04–0.07 mAP. Conclusions are about relative behaviour in this regime, not
-  about production-grade detection.
-- **Three seeds.** Enough to separate a 0.007 difference from a 0.001 spread;
-  not enough for a distributional claim.
-- **Five of eleven configurations are single-seed** and are reported as
-  observations only.
-- **Resumed runs are not bit-exact reproducible** — DataLoader shuffle RNG state
-  is not restored across a resume. Uninterrupted runs at a fixed seed are
-  reproducible.
+This is a **budget-regime study**, and every result is a statement about that
+regime — not a claim about RT-DETR distillation in general.
+
+- **Teacher strength.** A single R50 teacher at **0.142 val2017 mAP** on the
+  subset. Absolute detection quality is intentionally low; the contribution is
+  methodological (matched controls, honest negatives), not SOTA accuracy.
+- **Data.** 30K COCO subset (27.5K train / 2.5K selection, seed 42); val2017
+  is touched once per run. 512px input.
+- **Seeds.** n=3 (seeds 42/43/44) on baseline, the query pair, and the best
+  stage config; other methods are single-seed (42).
+- **Best-config caveat.** The 0.0676 headline came from a λ-swap *control* run,
+  not the calibrated λ; other methods were never run at that λ. The correct
+  claim is "best configuration found," not "stage-adaptive is the best method."
+- **Deployment.** TensorRT export and INT8 PTQ are **out of scope** here; the
+  deep quantization/serving story continues in
+  [MicroCLIP](#). No live demo ships with this repo — efficiency numbers
+  (fp16 → 160 FPS) are measured on an RTX 3050 and aren't reproducible on a
+  free CPU Space. Interactive detection/KD demos live on my HF profile:
+  [detrflow](https://huggingface.co/spaces/umutonuryasar/detrflow),
+  [kd-capacity-gap](https://huggingface.co/spaces/umutonuryasar/kd-capacity-gap).
 
 ---
 
